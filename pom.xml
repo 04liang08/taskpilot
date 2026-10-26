@@ -9,7 +9,7 @@
         <relativePath/> <!-- lookup parent from repository -->
     </parent>
 
-    <groupId>com.bkgl</groupId>
+    <groupId>com.taskpilot</groupId>
     <artifactId>taskpilot</artifactId>
     <version>0.0.1-SNAPSHOT</version>
     <packaging>pom</packaging>

@@ -1,13 +1,13 @@
-package com.bkgl.taskpilot.executor;
+package com.taskpilot.scheduler;
 
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 
 @SpringBootApplication
-public class TaskPilotExecutorApplication {
+public class TaskPilotSchedulerApplication {
 
     public static void main(String[] args) {
-        SpringApplication.run(TaskPilotExecutorApplication.class, args);
+        SpringApplication.run(TaskPilotSchedulerApplication.class, args);
     }
 
 }
