@@ -2,7 +2,7 @@
 
 分布式任务调度平台：**调度中心（scheduler）+ 执行器（executor）** 两段式架构。
 
-> 当前状态：第 1 周 Day 1 —— 工程骨架与数据库 schema 已就绪，业务接口按周逐步实现。
+> 当前状态：第 1 周 Day 2 —— 工程骨架、数据库 schema 与任务 CRUD 已就绪，其余接口按周逐步实现。
 
 ## 1. 它解决什么问题
 
@@ -126,7 +126,7 @@ docker exec -it taskpilot-mysql mysql -utaskpilot -ptaskpilot \
 ## 7. 当前进度
 
 - [x] Day 1：Maven 多模块、父 POM、三张表 DDL、Docker Compose、文档与脚本骨架
-- [ ] Day 2：任务 CRUD（Entity/Mapper/Service/Controller + 统一异常 + OpenAPI）
+- [x] Day 2：任务 CRUD（Entity/Mapper/Service/Controller + 统一异常 + 参数校验 + OpenAPI）
 - [ ] Day 3：Cron 校验、仪表盘、页面骨架
 - [ ] Day 4：执行器注册、心跳、处理器注册表
 - [ ] Day 5：手动触发、执行记录、单元测试、README 收尾
