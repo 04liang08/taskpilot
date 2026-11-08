@@ -1,0 +1,28 @@
+# ===== Build =====
+target/
+out/
+*.class
+
+# ===== IDE =====
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+
+# ===== Env & secrets =====
+.env
+.env.local
+*.pem
+*.key
+
+# ===== Logs =====
+logs/
+*.log
+
+# ===== OS =====
+.DS_Store
+Thumbs.db
+
+# ===== Maven wrapper =====
+.mvn/wrapper/maven-wrapper.jar

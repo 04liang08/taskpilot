@@ -1,0 +1,60 @@
+server:
+  port: 8080
+  shutdown: graceful
+
+spring:
+  application:
+    name: taskpilot-scheduler
+  jackson:
+    time-zone: Asia/Shanghai
+    date-format: yyyy-MM-dd HH:mm:ss.SSS
+  datasource:
+    url: ${TASKPILOT_MYSQL_URL:jdbc:mysql://localhost:3306/taskpilot?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true}
+    username: ${TASKPILOT_MYSQL_USERNAME:taskpilot}
+    password: ${TASKPILOT_MYSQL_PASSWORD:taskpilot}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 2
+      connection-timeout: 3000
+      validation-timeout: 3000
+  lifecycle:
+    timeout-per-shutdown-phase: 20s
+
+# Nacos 配置中心在后续接入：以 optional: 方式导入，本地无 Nacos 也能启动。
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
+  global-config:
+    banner: false
+    db-config:
+      logic-delete-field: deleted
+      logic-delete-value: 1
+      logic-not-delete-value: 0
+
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: always
+
+taskpilot:
+  executor:
+    heartbeat-timeout-seconds: 30
+    dispatch:
+      connect-timeout-ms: 3000
+      read-timeout-ms: 65000
+    selection: ROUND_ROBIN
+
+logging:
+  level:
+    com.taskpilot: INFO
