@@ -9,16 +9,15 @@ import com.taskpilot.common.enums.TriggerType;
 import com.taskpilot.common.exception.BizException;
 import com.taskpilot.common.exception.ErrorCode;
 import com.taskpilot.scheduler.dto.TaskCreateRequest;
+import com.taskpilot.scheduler.dto.CronValidateResult;
 import com.taskpilot.scheduler.dto.TaskQuery;
 import com.taskpilot.scheduler.dto.TaskUpdateRequest;
 import com.taskpilot.scheduler.entity.TaskEntity;
 import com.taskpilot.scheduler.mapper.TaskMapper;
-import org.springframework.scheduling.support.CronExpression;
+import com.taskpilot.scheduler.support.CronService;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
-
-import java.time.LocalDateTime;
 
 /**
  * 任务定义管理。第 1 周只做 CRUD/启停，定时触发在第 2 周接入。
@@ -29,16 +28,18 @@ public class TaskService {
     private static final String DEFAULT_GROUP = "DEFAULT";
 
     private final TaskMapper taskMapper;
+    private final CronService cronService;
 
-    public TaskService(TaskMapper taskMapper) {
+    public TaskService(TaskMapper taskMapper, CronService cronService) {
         this.taskMapper = taskMapper;
+        this.cronService = cronService;
     }
 
     @Transactional
     public TaskEntity create(TaskCreateRequest request) {
         String taskName = request.getTaskName().trim();
         String cronExpression = request.getCronExpression().trim();
-        validateCron(cronExpression);
+        assertCronValid(cronExpression);
         checkNameUnique(taskName, null);
 
         TaskEntity entity = new TaskEntity();
@@ -69,7 +70,7 @@ public class TaskService {
 
         String taskName = request.getTaskName().trim();
         String cronExpression = request.getCronExpression().trim();
-        validateCron(cronExpression);
+        assertCronValid(cronExpression);
         checkNameUnique(taskName, id);
 
         entity.setTaskName(taskName);
@@ -166,15 +167,10 @@ public class TaskService {
         }
     }
 
-    private void validateCron(String expression) {
-        try {
-            CronExpression cron = CronExpression.parse(expression);
-            if (cron.next(LocalDateTime.now()) == null) {
-                throw new BizException(ErrorCode.BAD_REQUEST, "cron 表达式永远不会触发: " + expression);
-            }
-        } catch (IllegalArgumentException e) {
-            throw new BizException(ErrorCode.BAD_REQUEST,
-                    "cron 表达式不合法（需要 6 段：秒 分 时 日 月 周）: " + expression);
+    private void assertCronValid(String expression) {
+        CronValidateResult result = cronService.validate(expression);
+        if (!result.valid()) {
+            throw new BizException(ErrorCode.BAD_REQUEST, result.message());
         }
     }
 

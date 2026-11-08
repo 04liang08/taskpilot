@@ -26,3 +26,5 @@ Thumbs.db
 
 # ===== Maven wrapper =====
 .mvn/wrapper/maven-wrapper.jar
+# ===== Local temp =====
+.tmp/

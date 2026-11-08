@@ -2,7 +2,7 @@
 
 分布式任务调度平台：**调度中心（scheduler）+ 执行器（executor）** 两段式架构。
 
-> 当前状态：第 1 周 Day 2 —— 工程骨架、数据库 schema 与任务 CRUD 已就绪，其余接口按周逐步实现。
+> 当前状态：第 1 周 Day 3 —— 工程骨架、数据库、任务 CRUD、cron 校验、仪表盘与极简演示页已就绪。
 
 ## 1. 它解决什么问题
 
@@ -103,6 +103,7 @@ curl http://localhost:8081/actuator/health
 
 - Swagger UI：<http://localhost:8080/swagger-ui.html>
 - OpenAPI JSON：<http://localhost:8080/v3/api-docs>
+- 演示页面：<http://localhost:8080/>（概览 / 任务 / 执行器 / 执行记录四个 Tab）
 
 ### 5.5 确认建表
 
@@ -127,7 +128,7 @@ docker exec -it taskpilot-mysql mysql -utaskpilot -ptaskpilot \
 
 - [x] Day 1：Maven 多模块、父 POM、三张表 DDL、Docker Compose、文档与脚本骨架
 - [x] Day 2：任务 CRUD（Entity/Mapper/Service/Controller + 统一异常 + 参数校验 + OpenAPI）
-- [ ] Day 3：Cron 校验、仪表盘、页面骨架
+- [x] Day 3：Cron 校验、仪表盘、极简演示页（概览 + 任务）
 - [ ] Day 4：执行器注册、心跳、处理器注册表
 - [ ] Day 5：手动触发、执行记录、单元测试、README 收尾
 
