@@ -14,6 +14,11 @@ const state = {
   executorStatus: '',
   executorGroup: '',
   executorTotal: 0,
+  executionPage: 1,
+  executionSize: 10,
+  executionTaskId: '',
+  executionStatus: '',
+  executionTotal: 0,
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -68,6 +73,11 @@ function toInt(value, fallback) {
   return Number.isNaN(parsed) ? fallback : parsed;
 }
 
+function truncateText(value, maxLength) {
+  const text = String(value ?? '');
+  return text.length > maxLength ? `${text.slice(0, maxLength)}…` : text;
+}
+
 function toast(message, type = 'info') {
   const element = document.createElement('div');
   element.className = `toast ${type}`;
@@ -89,6 +99,9 @@ function switchTab(tab) {
   }
   if (tab === 'executors') {
     loadExecutors();
+  }
+  if (tab === 'executions') {
+    loadExecutions();
   }
 }
 
@@ -153,6 +166,8 @@ function renderTasks(tasks) {
         <td><span class="badge ${enabled ? 'on' : 'off'}">${enabled ? '启用' : '停用'}</span></td>
         <td>${task.timeoutSeconds}s</td>
         <td class="actions">
+          <button class="link" data-action="trigger" data-id="${task.id}"
+                  ${enabled ? '' : 'disabled title="任务未启用"'}>触发</button>
           <button class="link" data-action="edit" data-id="${task.id}">编辑</button>
           <button class="link ${enabled ? 'danger' : 'success'}"
                   data-action="toggle" data-id="${task.id}">${enabled ? '停用' : '启用'}</button>
@@ -220,6 +235,106 @@ function resetExecutorFilters() {
   state.executorGroup = '';
   state.executorPage = 1;
   loadExecutors();
+}
+
+async function loadExecutions() {
+  const params = new URLSearchParams({ page: state.executionPage, size: state.executionSize });
+  if (state.executionTaskId) {
+    params.set('taskId', state.executionTaskId);
+  }
+  if (state.executionStatus) {
+    params.set('status', state.executionStatus);
+  }
+
+  try {
+    const data = await api(`/executions?${params.toString()}`);
+    state.executionTotal = data.total;
+    renderExecutions(data.records);
+
+    const pages = Math.max(1, Math.ceil(data.total / data.size));
+    $('#execution-page-info').textContent = `共 ${data.total} 条 · 第 ${data.page} / ${pages} 页`;
+    $('#btn-execution-prev').disabled = data.page <= 1;
+    $('#btn-execution-next').disabled = data.page >= pages;
+  } catch (error) {
+    $('#execution-tbody').innerHTML =
+      `<tr><td colspan="8" class="empty">${escapeHtml(error.message)}</td></tr>`;
+  }
+}
+
+const EXECUTION_STATUS = {
+  RUNNING: { label: '运行中', className: 'running' },
+  SUCCESS: { label: '成功', className: 'success' },
+  FAILED: { label: '失败', className: 'failed' },
+  TIMEOUT: { label: '超时', className: 'timeout' },
+  CANCELED: { label: '已取消', className: 'off' },
+};
+
+const TRIGGER_TYPE = {
+  MANUAL: '手动',
+  CRON: '定时',
+  FIXED_RATE: '固定频率',
+};
+
+function renderExecutions(executions) {
+  const tbody = $('#execution-tbody');
+  if (!executions.length) {
+    tbody.innerHTML = '<tr><td colspan="8" class="empty">暂无执行记录，去任务列表点击「触发」</td></tr>';
+    return;
+  }
+  tbody.innerHTML = executions.map((execution) => {
+    const status = EXECUTION_STATUS[execution.status]
+      || { label: execution.status, className: 'off' };
+    const detail = execution.errorMessage
+      ? `<span class="error-text" title="${escapeHtml(execution.errorMessage)}">${escapeHtml(truncateText(execution.errorMessage, 90))}</span>`
+      : escapeHtml(truncateText(execution.resultSummary || '-', 90));
+    const duration = execution.durationMs == null ? '-' : `${execution.durationMs} ms`;
+    return `
+      <tr>
+        <td>${execution.id}</td>
+        <td>
+          <strong>${escapeHtml(execution.taskName)}</strong>
+          <div class="sub">task #${execution.taskId}</div>
+        </td>
+        <td>${escapeHtml(TRIGGER_TYPE[execution.triggerType] || execution.triggerType || '-')}</td>
+        <td><span class="badge ${status.className}">${escapeHtml(status.label)}</span></td>
+        <td><code>${escapeHtml(execution.executorAddress || '-')}</code></td>
+        <td>${escapeHtml(formatDateTime(execution.triggerTime))}</td>
+        <td>${duration}</td>
+        <td class="result-cell">${detail}</td>
+      </tr>`;
+  }).join('');
+}
+
+function applyExecutionFilters() {
+  const taskId = $('#filter-execution-task-id').value.trim();
+  if (taskId && !/^\d+$/.test(taskId)) {
+    toast('任务 ID 必须是数字', 'error');
+    return;
+  }
+  state.executionTaskId = taskId;
+  state.executionStatus = $('#filter-execution-status').value;
+  state.executionPage = 1;
+  loadExecutions();
+}
+
+function resetExecutionFilters() {
+  $('#filter-execution-task-id').value = '';
+  $('#filter-execution-status').value = '';
+  state.executionTaskId = '';
+  state.executionStatus = '';
+  state.executionPage = 1;
+  loadExecutions();
+}
+
+function refreshExecutionsSoon() {
+  if (state.tab === 'executions') {
+    loadExecutions();
+  }
+  setTimeout(() => {
+    if (state.tab === 'executions') {
+      loadExecutions();
+    }
+  }, 3000);
 }
 
 function openDialog(task = null) {
@@ -342,6 +457,26 @@ async function handleTaskAction(event) {
     return;
   }
   const id = button.dataset.id;
+
+  if (button.dataset.action === 'trigger') {
+    button.disabled = true;
+    try {
+      const execution = await api(`/tasks/${id}/trigger`, { method: 'POST' });
+      const status = EXECUTION_STATUS[execution.status] || { label: execution.status };
+      const duration = execution.durationMs == null ? '-' : `${execution.durationMs} ms`;
+      toast(`执行记录 #${execution.id}：${status.label}（${duration}）`,
+        execution.status === 'SUCCESS' ? 'success' : 'error');
+      loadOverview();
+      refreshExecutionsSoon();
+    } catch (error) {
+      toast(error.message, 'error');
+      refreshExecutionsSoon();
+    } finally {
+      button.disabled = false;
+    }
+    return;
+  }
+
   try {
     const task = await api(`/tasks/${id}`);
     if (button.dataset.action === 'edit') {
@@ -437,11 +572,34 @@ function bindEvents() {
     }
   });
 
+  $('#refresh-executions').addEventListener('click', loadExecutions);
+  $('#btn-search-executions').addEventListener('click', applyExecutionFilters);
+  $('#btn-reset-executions').addEventListener('click', resetExecutionFilters);
+  $('#filter-execution-task-id').addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      applyExecutionFilters();
+    }
+  });
+  $('#btn-execution-prev').addEventListener('click', () => {
+    if (state.executionPage > 1) {
+      state.executionPage -= 1;
+      loadExecutions();
+    }
+  });
+  $('#btn-execution-next').addEventListener('click', () => {
+    if (state.executionPage * state.executionSize < state.executionTotal) {
+      state.executionPage += 1;
+      loadExecutions();
+    }
+  });
+
   setInterval(() => {
     if (state.tab === 'overview') {
       loadOverview();
     } else if (state.tab === 'executors') {
       loadExecutors();
+    } else if (state.tab === 'executions') {
+      loadExecutions();
     }
   }, 5000);
 }

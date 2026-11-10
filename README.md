@@ -2,7 +2,7 @@
 
 分布式任务调度平台：**调度中心（scheduler）+ 执行器（executor）** 两段式架构。
 
-> 当前状态：第 1 周 Day 4 —— 执行器注册、心跳、处理器注册表与执行器页面已就绪。
+> 当前状态：第 1 周 Day 5 —— 手动触发、执行记录与演示页已端到端跑通，Week 1 完成。
 
 ## 1. 它解决什么问题
 
@@ -113,6 +113,25 @@ curl http://localhost:8081/api/v1/executor/handlers
 
 停掉执行器约 30 秒后，状态会从 `ONLINE` 变为 `OFFLINE`（下次心跳会自动恢复）。
 
+手动触发一次任务（先确保执行器在线）：
+
+```bash
+# 触发任务 1；同步返回本次执行记录，status 为 SUCCESS / FAILED / TIMEOUT
+curl -X POST http://localhost:8080/api/v1/tasks/1/trigger
+
+# 查看执行记录（页面「执行记录」Tab 同源）
+curl "http://localhost:8080/api/v1/executions?page=1&size=20"
+
+# 按任务/状态过滤
+curl "http://localhost:8080/api/v1/executions?page=1&size=20&taskId=1&status=SUCCESS"
+```
+
+- 触发前先插入 `RUNNING` 记录，调用结束后更新为 `SUCCESS` / `FAILED` / `TIMEOUT`。
+- 没有在线执行器时返回 `50001`，同时保留一条 `FAILED` 执行记录。
+- 手动触发每次生成 UUID `execution_key`，允许重复触发。
+
+相关入口：
+
 - Swagger UI：<http://localhost:8080/swagger-ui.html>
 - OpenAPI JSON：<http://localhost:8080/v3/api-docs>
 - 演示页面：<http://localhost:8080/>（概览 / 任务 / 执行器 / 执行记录四个 Tab）
@@ -133,6 +152,16 @@ docker exec -it taskpilot-mysql mysql -utaskpilot -ptaskpilot \
 ```
 
 错误码：`0` 成功、`40000` 参数错误、`40400` 不存在、`40900` 冲突、`50001` 执行器不可用、`50000` 服务内部错误。
+
+任务与执行记录：
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/api/v1/tasks/{id}/trigger` | 手动触发：校验启用状态、选择在线执行器、同步执行并返回执行记录 |
+| GET | `/api/v1/executions` | 分页查询：`page`、`size`、`taskId`、`status`、`startTime`、`endTime` |
+| GET | `/api/v1/executions/{id}` | 执行记录详情 |
+
+执行状态：`RUNNING`（已落库、调用中）、`SUCCESS`、`FAILED`、`TIMEOUT`、`CANCELED`（第 1 周未使用）。
 
 执行器注册表：
 
@@ -160,7 +189,7 @@ docker exec -it taskpilot-mysql mysql -utaskpilot -ptaskpilot \
 - [x] Day 2：任务 CRUD（Entity/Mapper/Service/Controller + 统一异常 + 参数校验 + OpenAPI）
 - [x] Day 3：Cron 校验、仪表盘、极简演示页（概览 + 任务）
 - [x] Day 4：执行器注册、心跳、处理器注册表、执行器页面
-- [ ] Day 5：手动触发、执行记录、单元测试、README 收尾
+- [x] Day 5：手动触发、执行记录、单元测试、README 收尾
 
 ## 8. 文档索引
 
@@ -176,6 +205,8 @@ docker exec -it taskpilot-mysql mysql -utaskpilot -ptaskpilot \
 3. **容器里的执行器地址能写 localhost 吗？** 不能。要写调度中心可访问的地址（宿主机用 `127.0.0.1:8081`，容器网络用 `executor:8081`）。
 4. **cron 为什么是 6 段？** Spring `CronExpression` 是 `秒 分 时 日 月 周`，不是 Linux crontab 的 5 段。
 5. **执行器一直显示 OFFLINE？** 确认调度中心能访问 `taskpilot.executor.address`：本地用 `127.0.0.1:8081`，容器网络用 `executor:8081`；心跳间隔 10 秒，超过 30 秒无心跳才会下线。
+6. **手动触发提示“没有可用的在线执行器”？** 先启动 `taskpilot-executor`，等执行器页面出现 `ONLINE`；触发失败也会留下一条 `FAILED` 执行记录。
+7. **任务触发提示“任务未启用”？** 手动触发只允许 `ENABLED` 任务，先在任务列表点击「启用」。
 
 ## 10. Roadmap
 

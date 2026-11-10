@@ -6,8 +6,10 @@ import com.taskpilot.common.enums.TaskStatus;
 import com.taskpilot.scheduler.dto.TaskCreateRequest;
 import com.taskpilot.scheduler.dto.TaskQuery;
 import com.taskpilot.scheduler.dto.TaskUpdateRequest;
+import com.taskpilot.scheduler.entity.ExecutionLogEntity;
 import com.taskpilot.scheduler.entity.TaskEntity;
 import com.taskpilot.scheduler.service.TaskService;
+import com.taskpilot.scheduler.service.TriggerService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
@@ -21,15 +23,17 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
-@Tag(name = "任务管理", description = "任务 CRUD、启停")
+@Tag(name = "任务管理", description = "任务 CRUD、启停、手动触发")
 @RestController
 @RequestMapping("/api/v1/tasks")
 public class TaskController {
 
     private final TaskService taskService;
+    private final TriggerService triggerService;
 
-    public TaskController(TaskService taskService) {
+    public TaskController(TaskService taskService, TriggerService triggerService) {
         this.taskService = taskService;
+        this.triggerService = triggerService;
     }
 
     @Operation(summary = "新建任务")
@@ -74,5 +78,11 @@ public class TaskController {
     @PostMapping("/{id}/disable")
     public ApiResponse<TaskEntity> disable(@PathVariable Long id) {
         return ApiResponse.ok(taskService.changeStatus(id, TaskStatus.DISABLED));
+    }
+
+    @Operation(summary = "手动触发任务，同步返回执行记录")
+    @PostMapping("/{id}/trigger")
+    public ApiResponse<ExecutionLogEntity> trigger(@PathVariable Long id) {
+        return ApiResponse.ok(triggerService.trigger(id));
     }
 }

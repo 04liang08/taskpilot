@@ -39,14 +39,22 @@ echo "== 5. execution logs"
 curl -s "$BASE/executions?page=1&size=20"
 echo
 
-echo "== 6. executors"
+echo "== 6. execution detail (replace 1 with returned executionId)"
+curl -s "$BASE/executions/1"
+echo
+
+echo "== 7. executions filtered by task/status"
+curl -s "$BASE/executions?page=1&size=20&taskId=1&status=SUCCESS"
+echo
+
+echo "== 8. executors"
 curl -s "$BASE/executors?page=1&size=20"
 echo
 
-echo "== 7. executor handlers (8081)"
+echo "== 9. executor handlers (8081)"
 curl -s http://localhost:8081/api/v1/executor/handlers
 echo
 
-echo "== 8. dashboard summary"
+echo "== 10. dashboard summary"
 curl -s "$BASE/dashboard/summary"
 echo
