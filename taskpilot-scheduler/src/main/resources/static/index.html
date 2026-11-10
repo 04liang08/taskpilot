@@ -87,8 +87,46 @@
   </section>
 
   <section id="panel-executors" class="panel">
-    <div class="section-head"><h2>执行器</h2></div>
-    <div class="placeholder">执行器注册与心跳在 Day 4 接入。</div>
+    <div class="section-head">
+      <h2>执行器</h2>
+      <button class="btn ghost" id="refresh-executors">刷新</button>
+    </div>
+    <div class="toolbar">
+      <select id="filter-executor-status">
+        <option value="">全部状态</option>
+        <option value="ONLINE">在线</option>
+        <option value="OFFLINE">离线</option>
+      </select>
+      <input id="filter-executor-group" placeholder="分组">
+      <button class="btn" id="btn-search-executors">搜索</button>
+      <button class="btn ghost" id="btn-reset-executors">重置</button>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+        <tr>
+          <th>ID</th>
+          <th>应用名</th>
+          <th>分组</th>
+          <th>地址</th>
+          <th>状态</th>
+          <th>最后心跳</th>
+          <th>注册时间</th>
+        </tr>
+        </thead>
+        <tbody id="executor-tbody">
+        <tr><td colspan="7" class="empty">加载中...</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="pager">
+      <span id="executor-page-info">-</span>
+      <div>
+        <button class="btn ghost" id="btn-executor-prev">上一页</button>
+        <button class="btn ghost" id="btn-executor-next">下一页</button>
+      </div>
+    </div>
+    <p class="hint">执行器每 10 秒心跳一次；超过 30 秒无心跳会被调度中心标记为离线，列表每 5 秒自动刷新。</p>
   </section>
 
   <section id="panel-executions" class="panel">

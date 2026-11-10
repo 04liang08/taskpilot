@@ -19,7 +19,8 @@ taskpilot:
     address: ${TASKPILOT_EXECUTOR_ADDRESS:127.0.0.1:8081}
     scheduler-base-url: ${TASKPILOT_SCHEDULER_URL:http://127.0.0.1:8080}
     heartbeat-interval-seconds: 10
-    handler-scan-package: com.taskpilot.executor.handler
+    connect-timeout-ms: 3000
+    read-timeout-ms: 5000
     thread-pool:
       core-size: 8
       max-size: 32

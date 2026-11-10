@@ -214,6 +214,10 @@ input:focus, select:focus, textarea:focus {
   width: 120px;
 }
 
+.toolbar input#filter-executor-group {
+  width: 120px;
+}
+
 .btn {
   appearance: none;
   border: 1px solid var(--border);

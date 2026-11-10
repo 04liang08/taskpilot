@@ -2,7 +2,7 @@
 
 分布式任务调度平台：**调度中心（scheduler）+ 执行器（executor）** 两段式架构。
 
-> 当前状态：第 1 周 Day 3 —— 工程骨架、数据库、任务 CRUD、cron 校验、仪表盘与极简演示页已就绪。
+> 当前状态：第 1 周 Day 4 —— 执行器注册、心跳、处理器注册表与执行器页面已就绪。
 
 ## 1. 它解决什么问题
 
@@ -101,6 +101,18 @@ curl http://localhost:8080/actuator/health
 curl http://localhost:8081/actuator/health
 ```
 
+执行器启动后会自动注册，并每 10 秒发送一次心跳：
+
+```bash
+# 执行器注册表（页面「执行器」Tab 同源）
+curl http://localhost:8080/api/v1/executors
+
+# 执行器已注册的处理器
+curl http://localhost:8081/api/v1/executor/handlers
+```
+
+停掉执行器约 30 秒后，状态会从 `ONLINE` 变为 `OFFLINE`（下次心跳会自动恢复）。
+
 - Swagger UI：<http://localhost:8080/swagger-ui.html>
 - OpenAPI JSON：<http://localhost:8080/v3/api-docs>
 - 演示页面：<http://localhost:8080/>（概览 / 任务 / 执行器 / 执行记录四个 Tab）
@@ -122,6 +134,24 @@ docker exec -it taskpilot-mysql mysql -utaskpilot -ptaskpilot \
 
 错误码：`0` 成功、`40000` 参数错误、`40400` 不存在、`40900` 冲突、`50001` 执行器不可用、`50000` 服务内部错误。
 
+执行器注册表：
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/api/v1/executors/register` | 执行器启动注册，按 `(appName, address)` 幂等 upsert |
+| POST | `/api/v1/executors/heartbeat` | 每 10 秒心跳，刷新状态与最后心跳时间 |
+| GET | `/api/v1/executors` | 分页查询：`page`、`size`、`status`、`group` |
+| GET | `/api/v1/executors/{id}` | 执行器详情 |
+
+执行器侧内部接口（端口 8081）：
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/api/v1/executor/execute` | 调度中心调用，按 `handlerName` 执行 |
+| GET | `/api/v1/executor/handlers` | 查看已注册处理器 |
+
+内置处理器：`demoHandler`（回显参数）、`sleepHandler`（演示耗时/超时）、`httpHandler`（GET 外部 URL）。
+
 接口清单与示例见 [第 1 周开工方案 · 第 5 节](docs/TaskPilot-第1周开工方案.md)。
 
 ## 7. 当前进度
@@ -129,7 +159,7 @@ docker exec -it taskpilot-mysql mysql -utaskpilot -ptaskpilot \
 - [x] Day 1：Maven 多模块、父 POM、三张表 DDL、Docker Compose、文档与脚本骨架
 - [x] Day 2：任务 CRUD（Entity/Mapper/Service/Controller + 统一异常 + 参数校验 + OpenAPI）
 - [x] Day 3：Cron 校验、仪表盘、极简演示页（概览 + 任务）
-- [ ] Day 4：执行器注册、心跳、处理器注册表
+- [x] Day 4：执行器注册、心跳、处理器注册表、执行器页面
 - [ ] Day 5：手动触发、执行记录、单元测试、README 收尾
 
 ## 8. 文档索引
@@ -145,6 +175,7 @@ docker exec -it taskpilot-mysql mysql -utaskpilot -ptaskpilot \
 2. **时间差 8 小时？** MySQL 容器、JDBC URL、Jackson 三处都固定 `Asia/Shanghai`。
 3. **容器里的执行器地址能写 localhost 吗？** 不能。要写调度中心可访问的地址（宿主机用 `127.0.0.1:8081`，容器网络用 `executor:8081`）。
 4. **cron 为什么是 6 段？** Spring `CronExpression` 是 `秒 分 时 日 月 周`，不是 Linux crontab 的 5 段。
+5. **执行器一直显示 OFFLINE？** 确认调度中心能访问 `taskpilot.executor.address`：本地用 `127.0.0.1:8081`，容器网络用 `executor:8081`；心跳间隔 10 秒，超过 30 秒无心跳才会下线。
 
 ## 10. Roadmap
 

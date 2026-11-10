@@ -14,6 +14,7 @@ import org.springframework.validation.BindException;
 import org.springframework.validation.FieldError;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.context.request.async.AsyncRequestNotUsableException;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 
 import java.util.stream.Collectors;
@@ -62,6 +63,12 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(HttpMessageNotReadableException.class)
     public ResponseEntity<ApiResponse<Void>> handleNotReadable(HttpMessageNotReadableException e) {
         return badRequest("请求体格式错误，请检查 JSON 与字段类型");
+    }
+
+    @ExceptionHandler(AsyncRequestNotUsableException.class)
+    public void handleClientAbort(AsyncRequestNotUsableException e) {
+        // 执行器被强杀时心跳连接会中断，响应已无法写出，不应记为服务端错误。
+        log.debug("client closed connection before response completed: {}", e.getMessage());
     }
 
     @ExceptionHandler(DataIntegrityViolationException.class)

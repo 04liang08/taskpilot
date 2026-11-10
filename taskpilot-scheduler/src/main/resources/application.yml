@@ -50,6 +50,7 @@ management:
 taskpilot:
   executor:
     heartbeat-timeout-seconds: 30
+    health-check-interval-seconds: 10
     dispatch:
       connect-timeout-ms: 3000
       read-timeout-ms: 65000

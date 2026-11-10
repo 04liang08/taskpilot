@@ -9,6 +9,11 @@ const state = {
   group: '',
   total: 0,
   editingId: null,
+  executorPage: 1,
+  executorSize: 10,
+  executorStatus: '',
+  executorGroup: '',
+  executorTotal: 0,
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -48,7 +53,10 @@ function formatDateTime(value) {
   if (!value) {
     return '-';
   }
-  const date = new Date(value);
+  const normalized = typeof value === 'string' && value.includes(' ')
+    ? value.replace(' ', 'T')
+    : value;
+  const date = new Date(normalized);
   if (Number.isNaN(date.getTime())) {
     return value;
   }
@@ -78,6 +86,9 @@ function switchTab(tab) {
   }
   if (tab === 'tasks') {
     loadTasks();
+  }
+  if (tab === 'executors') {
+    loadExecutors();
   }
 }
 
@@ -148,6 +159,67 @@ function renderTasks(tasks) {
         </td>
       </tr>`;
   }).join('');
+}
+
+async function loadExecutors() {
+  const params = new URLSearchParams({ page: state.executorPage, size: state.executorSize });
+  if (state.executorStatus) {
+    params.set('status', state.executorStatus);
+  }
+  if (state.executorGroup) {
+    params.set('group', state.executorGroup);
+  }
+
+  try {
+    const data = await api(`/executors?${params.toString()}`);
+    state.executorTotal = data.total;
+    renderExecutors(data.records);
+
+    const pages = Math.max(1, Math.ceil(data.total / data.size));
+    $('#executor-page-info').textContent = `共 ${data.total} 个 · 第 ${data.page} / ${pages} 页`;
+    $('#btn-executor-prev').disabled = data.page <= 1;
+    $('#btn-executor-next').disabled = data.page >= pages;
+  } catch (error) {
+    $('#executor-tbody').innerHTML =
+      `<tr><td colspan="7" class="empty">${escapeHtml(error.message)}</td></tr>`;
+  }
+}
+
+function renderExecutors(executors) {
+  const tbody = $('#executor-tbody');
+  if (!executors.length) {
+    tbody.innerHTML = '<tr><td colspan="7" class="empty">暂无执行器，启动 taskpilot-executor 后会自动注册</td></tr>';
+    return;
+  }
+  tbody.innerHTML = executors.map((executor) => {
+    const online = executor.status === 'ONLINE';
+    return `
+      <tr>
+        <td>${executor.id}</td>
+        <td><strong>${escapeHtml(executor.appName)}</strong></td>
+        <td>${escapeHtml(executor.executorGroup)}</td>
+        <td><code>${escapeHtml(executor.address)}</code></td>
+        <td><span class="badge ${online ? 'on' : 'off'}">${online ? '在线' : '离线'}</span></td>
+        <td>${escapeHtml(formatDateTime(executor.lastHeartbeatTime))}</td>
+        <td class="sub">${escapeHtml(formatDateTime(executor.createTime))}</td>
+      </tr>`;
+  }).join('');
+}
+
+function applyExecutorFilters() {
+  state.executorStatus = $('#filter-executor-status').value;
+  state.executorGroup = $('#filter-executor-group').value.trim();
+  state.executorPage = 1;
+  loadExecutors();
+}
+
+function resetExecutorFilters() {
+  $('#filter-executor-status').value = '';
+  $('#filter-executor-group').value = '';
+  state.executorStatus = '';
+  state.executorGroup = '';
+  state.executorPage = 1;
+  loadExecutors();
 }
 
 function openDialog(task = null) {
@@ -344,9 +416,32 @@ function bindEvents() {
     }
   });
 
+  $('#refresh-executors').addEventListener('click', loadExecutors);
+  $('#btn-search-executors').addEventListener('click', applyExecutorFilters);
+  $('#btn-reset-executors').addEventListener('click', resetExecutorFilters);
+  $('#filter-executor-group').addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      applyExecutorFilters();
+    }
+  });
+  $('#btn-executor-prev').addEventListener('click', () => {
+    if (state.executorPage > 1) {
+      state.executorPage -= 1;
+      loadExecutors();
+    }
+  });
+  $('#btn-executor-next').addEventListener('click', () => {
+    if (state.executorPage * state.executorSize < state.executorTotal) {
+      state.executorPage += 1;
+      loadExecutors();
+    }
+  });
+
   setInterval(() => {
     if (state.tab === 'overview') {
       loadOverview();
+    } else if (state.tab === 'executors') {
+      loadExecutors();
     }
   }, 5000);
 }

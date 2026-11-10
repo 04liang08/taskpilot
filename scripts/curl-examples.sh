@@ -43,6 +43,10 @@ echo "== 6. executors"
 curl -s "$BASE/executors?page=1&size=20"
 echo
 
-echo "== 7. dashboard summary"
+echo "== 7. executor handlers (8081)"
+curl -s http://localhost:8081/api/v1/executor/handlers
+echo
+
+echo "== 8. dashboard summary"
 curl -s "$BASE/dashboard/summary"
 echo
