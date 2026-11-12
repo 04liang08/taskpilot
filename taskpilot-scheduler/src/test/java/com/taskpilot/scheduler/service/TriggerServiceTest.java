@@ -4,6 +4,7 @@ import com.taskpilot.common.dto.ExecuteRequest;
 import com.taskpilot.common.dto.ExecuteResult;
 import com.taskpilot.common.enums.ExecutionStatus;
 import com.taskpilot.common.enums.TaskStatus;
+import com.taskpilot.common.enums.TriggerType;
 import com.taskpilot.common.exception.BizException;
 import com.taskpilot.common.exception.ErrorCode;
 import com.taskpilot.scheduler.client.ExecutorClient;
@@ -16,10 +17,15 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.web.client.ResourceAccessException;
 
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -46,6 +52,9 @@ class TriggerServiceTest {
     @Mock
     private ExecutorClient executorClient;
 
+    @Mock
+    private ThreadPoolTaskExecutor triggerExecutor;
+
     @InjectMocks
     private TriggerService triggerService;
 
@@ -59,7 +68,7 @@ class TriggerServiceTest {
         finished.setDurationMs(9L);
         when(taskService.get(1L)).thenReturn(task);
         when(executorService.listOnline()).thenReturn(List.of(executor));
-        when(executionService.createRunning(task, executor)).thenReturn(running);
+        when(executionService.createRunning(task, executor, TriggerType.MANUAL)).thenReturn(running);
         when(executorClient.execute(eq("127.0.0.1:8081"), any(ExecuteRequest.class)))
                 .thenReturn(ExecuteResult.success("ok", 9));
         when(executionService.complete(eq(running), any(ExecuteResult.class))).thenReturn(finished);
@@ -116,7 +125,7 @@ class TriggerServiceTest {
         failed.setStatus(ExecutionStatus.FAILED);
         when(taskService.get(1L)).thenReturn(task);
         when(executorService.listOnline()).thenReturn(List.of(executor));
-        when(executionService.createRunning(task, executor)).thenReturn(running);
+        when(executionService.createRunning(task, executor, TriggerType.MANUAL)).thenReturn(running);
         when(executorClient.execute(eq("127.0.0.1:8081"), any(ExecuteRequest.class)))
                 .thenThrow(new ResourceAccessException("Connection refused"));
         when(executionService.markFailed(eq(running), anyString())).thenReturn(failed);
@@ -126,6 +135,41 @@ class TriggerServiceTest {
         assertThat(result).isSameAs(failed);
         verify(executionService).markFailed(eq(running), anyString());
         verify(executionService, never()).markTimeout(any(ExecutionLogEntity.class), anyString());
+    }
+
+    @Test
+    void concurrentTriggerOfSameTaskIsRejected() throws Exception {
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        TaskEntity task = enabledTask();
+        ExecutorEntity executor = onlineExecutor();
+        ExecutionLogEntity running = runningExecution(203L);
+        when(taskService.get(1L)).thenReturn(task);
+        when(executorService.listOnline()).thenReturn(List.of(executor));
+        when(executionService.createRunning(task, executor, TriggerType.MANUAL)).thenReturn(running);
+        when(executorClient.execute(eq("127.0.0.1:8081"), any(ExecuteRequest.class)))
+                .thenAnswer(invocation -> {
+                    entered.countDown();
+                    release.await(5, TimeUnit.SECONDS);
+                    return ExecuteResult.success("ok", 1);
+                });
+        when(executionService.complete(eq(running), any(ExecuteResult.class))).thenReturn(running);
+
+        java.util.concurrent.ExecutorService pool = Executors.newSingleThreadExecutor();
+        try {
+            Future<?> first = pool.submit(() -> triggerService.trigger(1L));
+            assertThat(entered.await(5, TimeUnit.SECONDS)).isTrue();
+
+            assertThatThrownBy(() -> triggerService.trigger(1L))
+                    .isInstanceOf(BizException.class)
+                    .hasMessageContaining("正在执行中");
+
+            release.countDown();
+            first.get(5, TimeUnit.SECONDS);
+        } finally {
+            release.countDown();
+            pool.shutdownNow();
+        }
     }
 
     private TaskEntity enabledTask() {

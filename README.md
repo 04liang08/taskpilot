@@ -2,7 +2,7 @@
 
 分布式任务调度平台：**调度中心（scheduler）+ 执行器（executor）** 两段式架构。
 
-> 当前状态：第 1 周 Day 5 —— 手动触发、执行记录与演示页已端到端跑通，Week 1 完成。
+> 当前状态：第 2 周 Day 1 —— 自实现时间轮 + cron 定时触发已就绪（第 1 周全部完成）。
 
 ## 1. 它解决什么问题
 
@@ -143,6 +143,22 @@ curl "http://localhost:8080/api/v1/executions?page=1&size=20&taskId=1&status=SUC
 - 没有在线执行器时返回 `50001`，同时保留一条 `FAILED` 执行记录。
 - 手动触发每次生成 UUID `execution_key`，允许重复触发。
 
+定时触发（时间轮，1 秒粒度）：
+
+```bash
+# 建一个每 30 秒触发的任务；启用后会自己跑
+curl -X POST http://localhost:8080/api/v1/tasks \
+  -H 'Content-Type: application/json' \
+  -d '{"taskName":"cron-demo","cronExpression":"*/30 * * * * *","handlerName":"demoHandler"}'
+
+# 执行记录里 triggerType=CRON 的就是定时触发的
+curl "http://localhost:8080/api/v1/executions?page=1&size=20"
+```
+
+- 时间轮只扫描当前秒的槽位，不做每秒全表扫描；`next_trigger_time` 落在 `tp_task` 里，重启后自动重建。
+- 进程停机期间错过的触发**不补跑**，直接跳到下一个未来时间。
+- 同一任务不允许并发执行：手动触发撞上定时触发会返回 `40900`。
+
 相关入口：
 
 - Swagger UI：<http://localhost:8080/swagger-ui.html>
@@ -198,11 +214,21 @@ docker exec -it taskpilot-mysql mysql -utaskpilot -ptaskpilot \
 
 ## 7. 当前进度
 
+**第 1 周**
+
 - [x] Day 1：Maven 多模块、父 POM、三张表 DDL、Docker Compose、文档与脚本骨架
 - [x] Day 2：任务 CRUD（Entity/Mapper/Service/Controller + 统一异常 + 参数校验 + OpenAPI）
 - [x] Day 3：Cron 校验、仪表盘、极简演示页（概览 + 任务）
 - [x] Day 4：执行器注册、心跳、处理器注册表、执行器页面
 - [x] Day 5：手动触发、执行记录、单元测试、README 收尾
+
+**第 2 周**
+
+- [x] Day 1：自实现时间轮（1 秒粒度）+ cron 定时触发 + `next_trigger_time` 推进 + 重启重建
+- [ ] Day 2：错过触发的补偿策略、任务变更与时间轮联动
+- [ ] Day 3：领导选举（Redisson 锁 + fencing token）
+- [ ] Day 4：调度状态持久化与重启补偿
+- [ ] Day 5：双 scheduler 实例验收（同一任务只触发一次）
 
 ## 8. 文档索引
 
@@ -220,6 +246,7 @@ docker exec -it taskpilot-mysql mysql -utaskpilot -ptaskpilot \
 5. **执行器一直显示 OFFLINE？** 确认调度中心能访问 `taskpilot.executor.address`：本地用 `127.0.0.1:8081`，容器网络用 `executor:8081`；心跳间隔 10 秒，超过 30 秒无心跳才会下线。
 6. **手动触发提示“没有可用的在线执行器”？** 先启动 `taskpilot-executor`，等执行器页面出现 `ONLINE`；触发失败也会留下一条 `FAILED` 执行记录。
 7. **任务触发提示“任务未启用”？** 手动触发只允许 `ENABLED` 任务，先在任务列表点击「启用」。
+8. **定时任务没触发？** 看调度中心日志里的 `time wheel loaded: N task(s)`：N 为 0 说明没有启用中的 cron 任务；再看任务列表的「下次触发」是否正常推进。cron 必须是 6 段（秒 分 时 日 月 周）。
 
 ## 10. Roadmap
 

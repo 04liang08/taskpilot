@@ -10,6 +10,7 @@ import com.taskpilot.scheduler.dto.CronValidateResult;
 import com.taskpilot.scheduler.dto.TaskCreateRequest;
 import com.taskpilot.scheduler.entity.TaskEntity;
 import com.taskpilot.scheduler.mapper.TaskMapper;
+import com.taskpilot.scheduler.schedule.TaskScheduleEvent;
 import com.taskpilot.scheduler.support.CronService;
 import org.apache.ibatis.builder.MapperBuilderAssistant;
 import org.junit.jupiter.api.BeforeEach;
@@ -19,6 +20,7 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.context.ApplicationEventPublisher;
 
 import java.time.LocalDateTime;
 import java.util.List;
@@ -42,6 +44,9 @@ class TaskServiceTest {
     @Mock
     private CronService cronService;
 
+    @Mock
+    private ApplicationEventPublisher eventPublisher;
+
     @InjectMocks
     private TaskService taskService;
 
@@ -53,8 +58,10 @@ class TaskServiceTest {
 
     @Test
     void createAppliesDefaultsAndEnablesTask() {
+        LocalDateTime nextTrigger = LocalDateTime.now().plusSeconds(30);
         when(cronService.validate(anyString())).thenReturn(
-                CronValidateResult.valid(List.of(LocalDateTime.now().plusSeconds(30))));
+                CronValidateResult.valid(List.of(nextTrigger)));
+        when(cronService.nextTimeAfter(anyString(), any())).thenReturn(nextTrigger);
         when(taskMapper.selectCount(any())).thenReturn(0L);
         AtomicReference<TaskEntity> saved = new AtomicReference<>();
         when(taskMapper.insert(any(TaskEntity.class))).thenAnswer(invocation -> {
@@ -74,7 +81,9 @@ class TaskServiceTest {
         assertThat(created.getShardTotal()).isEqualTo(1);
         assertThat(created.getTimeoutSeconds()).isEqualTo(60);
         assertThat(created.getRetryMax()).isZero();
+        assertThat(created.getNextTriggerTime()).isEqualTo(nextTrigger);
         verify(taskMapper).insert(any(TaskEntity.class));
+        verify(eventPublisher).publishEvent(any(TaskScheduleEvent.class));
     }
 
     @Test
@@ -88,6 +97,18 @@ class TaskServiceTest {
                 .hasMessageContaining("任务名称已存在");
 
         verify(taskMapper, never()).insert(any(TaskEntity.class));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void clearNextTriggerTimeUsesTargetedUpdate() {
+        when(taskMapper.update(isNull(), any())).thenReturn(1);
+
+        taskService.clearNextTriggerTime(1L);
+
+        ArgumentCaptor<Wrapper<TaskEntity>> captor = ArgumentCaptor.forClass(Wrapper.class);
+        verify(taskMapper).update(isNull(), captor.capture());
+        assertThat(captor.getValue().getSqlSet()).contains("next_trigger_time");
     }
 
     @Test

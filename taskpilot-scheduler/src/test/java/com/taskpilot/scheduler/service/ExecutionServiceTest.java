@@ -3,6 +3,7 @@ package com.taskpilot.scheduler.service;
 import com.taskpilot.common.dto.ExecuteResult;
 import com.taskpilot.common.enums.ExecutionStatus;
 import com.taskpilot.common.enums.TriggerType;
+import com.taskpilot.common.enums.TriggerType;
 import com.taskpilot.scheduler.entity.ExecutionLogEntity;
 import com.taskpilot.scheduler.entity.ExecutorEntity;
 import com.taskpilot.scheduler.entity.TaskEntity;
@@ -37,7 +38,7 @@ class ExecutionServiceTest {
             return 1;
         });
 
-        ExecutionLogEntity execution = executionService.createRunning(task(), executor());
+        ExecutionLogEntity execution = executionService.createRunning(task(), executor(), TriggerType.MANUAL);
 
         assertThat(execution.getId()).isEqualTo(100L);
         assertThat(execution.getExecutionKey()).isNotBlank();

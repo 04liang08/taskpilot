@@ -31,7 +31,7 @@
 ### scheduler-center
 
 - 任务定义管理：CRUD、启停、cron 校验。
-- 触发：第 1 周仅手动触发；第 2 周接入时间轮 + 领导选举。
+- 触发：手动触发 + 自实现时间轮的 cron 定时触发；第 2 周后半段接入领导选举。
 - 执行器注册表：注册 / 心跳 / 超时下线；第 3 周扩展为分片与失败转移依据。
 - 执行记录：先落 `RUNNING` 再调用执行器，最终更新为 `SUCCESS/FAILED/TIMEOUT`。
 - 管理端：REST API + `static/index.html` 极简演示页。
@@ -73,6 +73,27 @@ POST /api/v1/tasks/{id}/trigger
 
 先落库再调用，保证超时或进程崩溃时仍有执行记录可追溯。
 
+### 3.3 定时触发（时间轮）
+
+```text
+scheduler 启动
+  → 从 tp_task 读出 ENABLED + CRON 的任务
+  → next_trigger_time 在未来就沿用；已过期（停过机）就跳到下一个未来时间，不补跑
+  → 按 next_trigger_time 放入时间轮槽位（slot = epochSecond % 60）
+
+每秒 tick
+  → 只扫描当前秒对应的槽位（不做全表扫描）
+  → 到点的任务 → 提交到独立触发线程池（时间轮线程不等待执行结果）
+  → 执行记录落 RUNNING → 调用执行器 → 更新 SUCCESS/FAILED/TIMEOUT
+  → 计算下一个 cron 时间 → 写回 next_trigger_time → 重新入轮
+
+任务新建/更新/启停
+  → 发布事务提交后的事件（TaskScheduleEvent）
+  → 调度器据此重排或移出时间轮
+```
+
+关键点：DB 是真相源，时间轮只是内存索引；进程重启后按 `next_trigger_time` 重建，天然具备重启补偿能力。
+
 ## 4. 数据模型
 
 | 表 | 说明 | 关键约束 |
@@ -91,3 +112,5 @@ POST /api/v1/tasks/{id}/trigger
 | 3 | 分片参数下发、执行器上下线重分配、失败转移、重试/退避、幂等闭环 |
 | 4 | MQ 上报结果、告警 webhook、Micrometer 指标、压测与 CI |
 | 5 | 文档、架构图、演示录屏 |
+
+> 第 2 周进度：时间轮 + cron 定时触发已落地（Day 1），领导选举与 fencing token 待做。

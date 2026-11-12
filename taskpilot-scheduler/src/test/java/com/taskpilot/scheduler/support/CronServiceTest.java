@@ -35,4 +35,18 @@ class CronServiceTest {
         assertThat(result.message()).isNotBlank();
         assertThat(result.nextTimes()).isEmpty();
     }
+
+    @Test
+    void nextTimeAfterReturnsFutureTime() {
+        LocalDateTime from = LocalDateTime.of(2026, 11, 12, 10, 0, 5);
+
+        LocalDateTime next = cronService.nextTimeAfter("*/10 * * * * *", from);
+
+        assertThat(next).isEqualTo(LocalDateTime.of(2026, 11, 12, 10, 0, 10));
+    }
+
+    @Test
+    void nextTimeAfterReturnsNullForInvalidExpression() {
+        assertThat(cronService.nextTimeAfter("not-a-cron", LocalDateTime.now())).isNull();
+    }
 }

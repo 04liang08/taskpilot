@@ -14,12 +14,15 @@ import com.taskpilot.scheduler.dto.TaskQuery;
 import com.taskpilot.scheduler.dto.TaskUpdateRequest;
 import com.taskpilot.scheduler.entity.TaskEntity;
 import com.taskpilot.scheduler.mapper.TaskMapper;
+import com.taskpilot.scheduler.schedule.TaskScheduleEvent;
 import com.taskpilot.scheduler.support.CronService;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
 import java.time.LocalDateTime;
+import java.util.List;
 
 /**
  * 任务定义管理。第 1 周只做 CRUD/启停，定时触发在第 2 周接入。
@@ -31,10 +34,14 @@ public class TaskService {
 
     private final TaskMapper taskMapper;
     private final CronService cronService;
+    private final ApplicationEventPublisher eventPublisher;
 
-    public TaskService(TaskMapper taskMapper, CronService cronService) {
+    public TaskService(TaskMapper taskMapper,
+                       CronService cronService,
+                       ApplicationEventPublisher eventPublisher) {
         this.taskMapper = taskMapper;
         this.cronService = cronService;
+        this.eventPublisher = eventPublisher;
     }
 
     @Transactional
@@ -58,8 +65,10 @@ public class TaskService {
         entity.setRetryIntervalSeconds(defaultIfNull(request.getRetryIntervalSeconds(), 10));
         entity.setStatus(TaskStatus.ENABLED);
         entity.setDescription(request.getDescription());
+        entity.setNextTriggerTime(nextTriggerTime(cronExpression));
 
         taskMapper.insert(entity);
+        publishScheduleChanged(entity.getId(), false);
         return get(entity.getId());
     }
 
@@ -99,8 +108,11 @@ public class TaskService {
         if (request.getDescription() != null) {
             entity.setDescription(request.getDescription());
         }
+        // cron 可能被改过，下次触发时间要重新计算。
+        entity.setNextTriggerTime(nextTriggerTime(entity.getCronExpression()));
 
         updateWithVersionCheck(entity);
+        publishScheduleChanged(id, false);
         return get(id);
     }
 
@@ -111,6 +123,7 @@ public class TaskService {
         if (rows == 0) {
             throw new BizException(ErrorCode.NOT_FOUND, "任务不存在或已删除: " + id);
         }
+        publishScheduleChanged(id, true);
     }
 
     public TaskEntity get(Long id) {
@@ -146,8 +159,45 @@ public class TaskService {
             return entity;
         }
         entity.setStatus(status);
+        if (status == TaskStatus.ENABLED) {
+            // 重新启用时重新计算下次触发时间。
+            entity.setNextTriggerTime(nextTriggerTime(entity.getCronExpression()));
+        }
         updateWithVersionCheck(entity);
+        if (status == TaskStatus.DISABLED) {
+            // 停用后不再有下次触发。这里必须用定向更新：
+            // updateById 会跳过 null 字段，靠实体置空是清不掉这一列的。
+            clearNextTriggerTime(id);
+        }
+        publishScheduleChanged(id, false);
         return get(id);
+    }
+
+    /**
+     * 可定时触发的任务：启用状态 + cron 触发类型。调度器启动时按这个口径重建时间轮。
+     */
+    public List<TaskEntity> listSchedulable() {
+        return taskMapper.selectList(Wrappers.<TaskEntity>lambdaQuery()
+                .eq(TaskEntity::getStatus, TaskStatus.ENABLED)
+                .eq(TaskEntity::getTriggerType, TriggerType.CRON));
+    }
+
+    /**
+     * 时间轮推进下一次触发时间。只改这一列，不动乐观锁版本。
+     */
+    public void updateNextTriggerTime(Long id, LocalDateTime nextTriggerTime) {
+        taskMapper.update(null, Wrappers.<TaskEntity>lambdaUpdate()
+                .eq(TaskEntity::getId, id)
+                .set(TaskEntity::getNextTriggerTime, nextTriggerTime));
+    }
+
+    /**
+     * 清空下次触发时间（任务停用时调用）。
+     */
+    public void clearNextTriggerTime(Long id) {
+        taskMapper.update(null, Wrappers.<TaskEntity>lambdaUpdate()
+                .eq(TaskEntity::getId, id)
+                .set(TaskEntity::getNextTriggerTime, null));
     }
 
     /**
@@ -158,6 +208,14 @@ public class TaskService {
         taskMapper.update(null, Wrappers.<TaskEntity>lambdaUpdate()
                 .eq(TaskEntity::getId, id)
                 .set(TaskEntity::getLastTriggerTime, LocalDateTime.now()));
+    }
+
+    private LocalDateTime nextTriggerTime(String cronExpression) {
+        return cronService.nextTimeAfter(cronExpression, LocalDateTime.now(CronService.ZONE));
+    }
+
+    private void publishScheduleChanged(Long taskId, boolean deleted) {
+        eventPublisher.publishEvent(new TaskScheduleEvent(taskId, deleted));
     }
 
     private void updateWithVersionCheck(TaskEntity entity) {

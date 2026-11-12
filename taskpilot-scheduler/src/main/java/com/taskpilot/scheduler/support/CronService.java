@@ -38,4 +38,16 @@ public class CronService {
             return CronValidateResult.invalid("cron 表达式不合法（需要 6 段：秒 分 时 日 月 周）");
         }
     }
+
+    /**
+     * 计算 from 之后的下一个触发时间。cron 非法或不会再触发时返回 null。
+     * <p>时间轮推进 next_trigger_time 用这个方法，保证节奏和 cron 定义一致。</p>
+     */
+    public LocalDateTime nextTimeAfter(String expression, LocalDateTime from) {
+        try {
+            return CronExpression.parse(expression).next(from);
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+    }
 }

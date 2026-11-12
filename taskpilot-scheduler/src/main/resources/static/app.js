@@ -141,7 +141,7 @@ async function loadTasks() {
     $('#btn-prev').disabled = data.page <= 1;
     $('#btn-next').disabled = data.page >= pages;
   } catch (error) {
-    $('#task-tbody').innerHTML = `<tr><td colspan="8" class="empty">${escapeHtml(error.message)}</td></tr>`;
+    $('#task-tbody').innerHTML = `<tr><td colspan="10" class="empty">${escapeHtml(error.message)}</td></tr>`;
   }
 }
 
@@ -164,6 +164,8 @@ function renderTasks(tasks) {
         <td><code>${escapeHtml(task.cronExpression)}</code></td>
         <td>${escapeHtml(task.handlerName)}</td>
         <td><span class="badge ${enabled ? 'on' : 'off'}">${enabled ? '启用' : '停用'}</span></td>
+        <td>${escapeHtml(formatDateTime(task.nextTriggerTime))}</td>
+        <td class="sub">${escapeHtml(formatDateTime(task.lastTriggerTime))}</td>
         <td>${task.timeoutSeconds}s</td>
         <td class="actions">
           <button class="link" data-action="trigger" data-id="${task.id}"

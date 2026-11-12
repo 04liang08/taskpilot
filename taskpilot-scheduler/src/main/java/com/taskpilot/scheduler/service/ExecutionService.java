@@ -39,13 +39,13 @@ public class ExecutionService {
     /**
      * 手动触发先插入 RUNNING 记录。execution_key 使用 UUID，允许重复手动触发。
      */
-    public ExecutionLogEntity createRunning(TaskEntity task, ExecutorEntity executor) {
+    public ExecutionLogEntity createRunning(TaskEntity task, ExecutorEntity executor, TriggerType triggerType) {
         LocalDateTime now = LocalDateTime.now();
         ExecutionLogEntity entity = new ExecutionLogEntity();
         entity.setExecutionKey(UUID.randomUUID().toString());
         entity.setTaskId(task.getId());
         entity.setTaskName(task.getTaskName());
-        entity.setTriggerType(TriggerType.MANUAL);
+        entity.setTriggerType(triggerType);
         entity.setTriggerTime(now);
         entity.setStartTime(now);
         entity.setExecutorId(executor == null ? null : executor.getId());
