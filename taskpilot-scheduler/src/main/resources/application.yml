@@ -54,7 +54,6 @@ taskpilot:
     dispatch:
       connect-timeout-ms: 3000
       read-timeout-ms: 65000
-    selection: ROUND_ROBIN
 
 logging:
   level:

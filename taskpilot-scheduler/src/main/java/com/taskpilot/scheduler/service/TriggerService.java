@@ -61,6 +61,7 @@ public class TriggerService {
         ExecutorEntity executor = onlineExecutors.get(
                 Math.floorMod(roundRobin.getAndIncrement(), onlineExecutors.size()));
         ExecutionLogEntity execution = executionService.createRunning(task, executor);
+        taskService.markTriggered(taskId);
 
         ExecuteRequest request = new ExecuteRequest(
                 execution.getId(),

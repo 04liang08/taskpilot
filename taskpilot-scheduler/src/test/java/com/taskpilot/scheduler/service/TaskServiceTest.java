@@ -1,6 +1,7 @@
 package com.taskpilot.scheduler.service;
 
 import com.baomidou.mybatisplus.core.MybatisConfiguration;
+import com.baomidou.mybatisplus.core.conditions.Wrapper;
 import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
 import com.taskpilot.common.enums.TaskStatus;
 import com.taskpilot.common.enums.TriggerType;
@@ -14,6 +15,7 @@ import org.apache.ibatis.builder.MapperBuilderAssistant;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -26,6 +28,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -85,6 +88,18 @@ class TaskServiceTest {
                 .hasMessageContaining("任务名称已存在");
 
         verify(taskMapper, never()).insert(any(TaskEntity.class));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void markTriggeredUpdatesLastTriggerTimeWithoutTouchingVersion() {
+        when(taskMapper.update(isNull(), any())).thenReturn(1);
+
+        taskService.markTriggered(1L);
+
+        ArgumentCaptor<Wrapper<TaskEntity>> captor = ArgumentCaptor.forClass(Wrapper.class);
+        verify(taskMapper).update(isNull(), captor.capture());
+        assertThat(captor.getValue().getSqlSet()).contains("last_trigger_time");
     }
 
     private TaskCreateRequest createRequest(String taskName) {

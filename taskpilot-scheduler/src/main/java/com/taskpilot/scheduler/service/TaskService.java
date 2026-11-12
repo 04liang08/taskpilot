@@ -19,6 +19,8 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
+import java.time.LocalDateTime;
+
 /**
  * 任务定义管理。第 1 周只做 CRUD/启停，定时触发在第 2 周接入。
  */
@@ -146,6 +148,16 @@ public class TaskService {
         entity.setStatus(status);
         updateWithVersionCheck(entity);
         return get(id);
+    }
+
+    /**
+     * 记录上次触发时间。用定向更新而不是 updateById：不碰乐观锁版本，
+     * 避免触发链路和用户在页面上编辑任务互相冲突。
+     */
+    public void markTriggered(Long id) {
+        taskMapper.update(null, Wrappers.<TaskEntity>lambdaUpdate()
+                .eq(TaskEntity::getId, id)
+                .set(TaskEntity::getLastTriggerTime, LocalDateTime.now()));
     }
 
     private void updateWithVersionCheck(TaskEntity entity) {

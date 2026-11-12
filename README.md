@@ -73,6 +73,19 @@ docker compose -f deploy/docker-compose.yml up -d mysql redis nacos
 > 如果本机 3306 已被占用，先停止本地 MySQL 服务，或修改 compose 中的端口映射。
 > Nacos 启动较慢且当前应用不强依赖它，只起 MySQL 也能开发。
 
+#### 没有 Docker 时
+
+本机没装 Docker（或 compose 起不来）时，用本地服务开发即可：
+
+```bash
+# MySQL 8：本地实例，建表一次即可
+mysql -h 127.0.0.1 -P 3306 -u root -p < deploy/sql/01-init.sql
+```
+
+- 数据库连接用环境变量覆盖：`TASKPILOT_MYSQL_URL`、`TASKPILOT_MYSQL_USERNAME`、`TASKPILOT_MYSQL_PASSWORD`。
+- Redis 从第 2 周（领导选举）开始才需要，届时用本机 `redis-server` 或容器都行。
+- 两个应用直接用 IDE 运行启动类，不需要打包部署。
+
 ### 5.2 构建
 
 ```bash

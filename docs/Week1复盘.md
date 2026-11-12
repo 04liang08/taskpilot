@@ -120,11 +120,12 @@
 
 | 问题 | 位置 | 说明 |
 |---|---|---|
-| 死配置 | `taskpilot-executor/application.yml` 的 `handler-scan-package` | `HandlerRegistry` 实际靠构造器注入收集 Bean，这个配置从未被读取 |
-| 死配置 | `taskpilot-scheduler/application.yml` 的 `selection: ROUND_ROBIN` | `TriggerService` 里是写死的进程内计数器，配置项没被读取 |
-| 字段未使用 | `tp_task.last_trigger_time` | 建表预留了但从未写入，手动触发也没更新 |
+| 死配置 | `taskpilot-scheduler/application.yml` 的 `selection: ROUND_ROBIN` | `TriggerService` 里是写死的进程内计数器，配置项没被读取 → **11-12 已删除**，等 Week 3 真有多种策略再抽象 |
+| 字段未使用 | `tp_task.last_trigger_time` | 建表预留但从未写入 → **11-12 已打通**：触发时定向更新（不碰乐观锁版本），并补了单测 |
 | 枚举未使用 | `ExecutionStatus.CANCELED` | 第 1 周用不到，已在 README 标注 |
 | 同步阻塞 | `TriggerService.trigger` | 任务执行期间占用 Web 线程；长任务体验差，第 3 周异步化时处理 |
+
+> 复核更正：初稿曾把 executor 的 `handler-scan-package` 列为死配置，实际它在 Day 4 就已从 `application.yml` 删除，只存在于方案文档里，不属于代码问题。
 
 ### 5.3 功能缺口（按重要度）
 
