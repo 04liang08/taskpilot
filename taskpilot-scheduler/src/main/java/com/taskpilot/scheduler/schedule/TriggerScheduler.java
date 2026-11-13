@@ -5,6 +5,9 @@ import com.taskpilot.common.enums.TriggerType;
 import com.taskpilot.common.exception.BizException;
 import com.taskpilot.scheduler.config.SchedulerProperties;
 import com.taskpilot.scheduler.entity.TaskEntity;
+import com.taskpilot.scheduler.leader.LeaderChangedEvent;
+import com.taskpilot.scheduler.leader.LeaderContext;
+import com.taskpilot.scheduler.leader.LeaderElectionService;
 import com.taskpilot.scheduler.service.TaskService;
 import com.taskpilot.scheduler.service.TriggerService;
 import com.taskpilot.scheduler.support.CronService;
@@ -47,6 +50,7 @@ public class TriggerScheduler {
     private final TaskService taskService;
     private final TriggerService triggerService;
     private final CronService cronService;
+    private final LeaderElectionService leaderElectionService;
     private final TimeWheel wheel;
     private final long tickMillis;
     private final int maxCatchUpSeconds;
@@ -58,10 +62,12 @@ public class TriggerScheduler {
     public TriggerScheduler(TaskService taskService,
                             TriggerService triggerService,
                             CronService cronService,
+                            LeaderElectionService leaderElectionService,
                             SchedulerProperties properties) {
         this.taskService = taskService;
         this.triggerService = triggerService;
         this.cronService = cronService;
+        this.leaderElectionService = leaderElectionService;
         this.wheel = new TimeWheel(properties.getWheelSize());
         this.tickMillis = properties.getTickMillis();
         this.maxCatchUpSeconds = properties.getMaxCatchUpSeconds();
@@ -108,9 +114,31 @@ public class TriggerScheduler {
     }
 
     /**
+     * leader 身份变化：拿到 leader 就按 DB 重建时间轮，失去 leader 就把轮子清空。
+     * <p>重建是必须的：新 leader 必须以 DB 里的 next_trigger_time 为准，而不是沿用旧内存状态。</p>
+     */
+    @EventListener
+    public void onLeaderChanged(LeaderChangedEvent event) {
+        if (event.leader()) {
+            log.info("became leader, reload time wheel: instanceId={}, token={}",
+                    leaderElectionService.instanceId(), event.leaderToken());
+            // 重新以当前时间为基准，避免把当 follower 期间的时间当成落后要回补。
+            lastTickSecond.set(0);
+            loadTasks();
+        } else {
+            log.info("lost leadership, stop time wheel: instanceId={}", leaderElectionService.instanceId());
+            clearWheel();
+        }
+    }
+
+    /**
      * 推进一轮。nowEpochSecond 由外部传入，便于测试和补偿调用。
      */
     public void tick(long nowEpochSecond) {
+        if (!leaderElectionService.isLeader()) {
+            // 非 leader 不推轮子：集群里只能有一个实例在触发。
+            return;
+        }
         long last = lastTickSecond.getAndSet(nowEpochSecond);
         if (last <= 0) {
             // 第一轮只记录基准时间。
@@ -148,12 +176,16 @@ public class TriggerScheduler {
     }
 
     private void fire(Long taskId, long scheduledEpochSecond) {
+        if (!leaderElectionService.isLeader()) {
+            return;
+        }
         ScheduledTask scheduled = cache.get(taskId);
         if (scheduled == null) {
             // 任务已停用或删除，不再触发。
             return;
         }
-        triggerService.triggerAsync(taskId);
+        LeaderContext leaderContext = leaderElectionService.currentContext();
+        triggerService.triggerAsync(taskId, leaderContext);
 
         LocalDateTime next = cronService.nextTimeAfter(
                 scheduled.cronExpression(), toLocalDateTime(scheduledEpochSecond));
@@ -186,6 +218,14 @@ public class TriggerScheduler {
     private void remove(Long taskId) {
         wheel.cancel(taskId);
         cache.remove(taskId);
+    }
+
+    /**
+     * 清空时间轮与缓存（失去 leader 身份时调用）。
+     */
+    private void clearWheel() {
+        wheel.clear();
+        cache.clear();
     }
 
     private long currentEpochSecond() {

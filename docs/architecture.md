@@ -73,7 +73,24 @@ POST /api/v1/tasks/{id}/trigger
 
 先落库再调用，保证超时或进程崩溃时仍有执行记录可追溯。
 
-### 3.3 定时触发（时间轮）
+### 3.4 领导选举（集群只触发一次）
+
+```text
+每个 scheduler 实例
+  → 每 2 秒尝试抢 Redis 锁 taskpilot:scheduler:leader（Redisson RLock，watchdog 自动续期）
+  → 抢到后领 token = max(Redis 计数器, tp_leader.fencing_token + 1)
+  → 写 tp_leader（instance_id + fencing_token）；token 落后于库里的值则放弃
+  → 成为 leader：按 DB 重建时间轮，开始触发
+  → 失去锁：降级为 follower，清空时间轮，不再触发
+
+定时触发落库前
+  → fencing 校验：UPDATE tp_leader ... WHERE fencing_token <= 我的 token
+  → 影响行数为 0 说明有更新的 leader → 拒绝本次触发（40900）
+```
+
+关键点：锁解决"同时只有一个 leader"，fencing token 解决"过期 leader 复活后继续写"。两者缺一不可。
+
+### 3.5 定时触发（时间轮）
 
 ```text
 scheduler 启动
@@ -93,6 +110,8 @@ scheduler 启动
 ```
 
 关键点：DB 是真相源，时间轮只是内存索引；进程重启后按 `next_trigger_time` 重建，天然具备重启补偿能力。
+
+> 只有 leader 推轮子（见 3.4）；follower 拿到 leader 身份时会重新按 DB 重建时间轮。
 
 ## 4. 数据模型
 

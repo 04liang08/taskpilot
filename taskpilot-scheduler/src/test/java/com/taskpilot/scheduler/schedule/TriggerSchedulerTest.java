@@ -4,6 +4,9 @@ import com.taskpilot.common.enums.TaskStatus;
 import com.taskpilot.common.enums.TriggerType;
 import com.taskpilot.scheduler.config.SchedulerProperties;
 import com.taskpilot.scheduler.entity.TaskEntity;
+import com.taskpilot.scheduler.leader.LeaderChangedEvent;
+import com.taskpilot.scheduler.leader.LeaderContext;
+import com.taskpilot.scheduler.leader.LeaderElectionService;
 import com.taskpilot.scheduler.service.TaskService;
 import com.taskpilot.scheduler.service.TriggerService;
 import com.taskpilot.scheduler.support.CronService;
@@ -40,11 +43,15 @@ class TriggerSchedulerTest {
     @Mock
     private CronService cronService;
 
+    @Mock
+    private LeaderElectionService leaderElectionService;
+
     private TriggerScheduler scheduler;
 
     @BeforeEach
     void setUp() {
-        scheduler = new TriggerScheduler(taskService, triggerService, cronService, new SchedulerProperties());
+        scheduler = new TriggerScheduler(taskService, triggerService, cronService,
+                leaderElectionService, new SchedulerProperties());
     }
 
     @Test
@@ -79,14 +86,49 @@ class TriggerSchedulerTest {
         TaskEntity task = task(1L, due);
         when(taskService.listSchedulable()).thenReturn(List.of(task));
         when(cronService.nextTimeAfter(eq(CRON), any())).thenReturn(next);
+        when(leaderElectionService.isLeader()).thenReturn(true);
+        when(leaderElectionService.currentContext())
+                .thenReturn(new LeaderContext(7L, "inst-a"));
 
         scheduler.loadTasks();
         long dueEpoch = due.atZone(ZONE).toEpochSecond();
         scheduler.tick(dueEpoch - 1);
         scheduler.tick(dueEpoch);
 
-        verify(triggerService).triggerAsync(1L);
+        verify(triggerService).triggerAsync(eq(1L), eq(new LeaderContext(7L, "inst-a")));
         verify(taskService).updateNextTriggerTime(eq(1L), eq(next));
+    }
+
+    @Test
+    void tickDoesNothingWhenNotLeader() {
+        LocalDateTime due = LocalDateTime.now(ZONE).plusSeconds(5);
+        TaskEntity task = task(1L, due);
+        when(taskService.listSchedulable()).thenReturn(List.of(task));
+        when(leaderElectionService.isLeader()).thenReturn(false);
+
+        scheduler.loadTasks();
+        long dueEpoch = due.atZone(ZONE).toEpochSecond();
+        scheduler.tick(dueEpoch - 1);
+        scheduler.tick(dueEpoch);
+
+        verify(triggerService, never()).triggerAsync(any(), any());
+    }
+
+    @Test
+    void losingLeadershipStopsTheWheel() {
+        LocalDateTime due = LocalDateTime.now(ZONE).plusSeconds(5);
+        TaskEntity task = task(1L, due);
+        when(taskService.listSchedulable()).thenReturn(List.of(task));
+        when(leaderElectionService.isLeader()).thenReturn(true);
+        scheduler.loadTasks();
+
+        scheduler.onLeaderChanged(new LeaderChangedEvent(false, null));
+        when(leaderElectionService.isLeader()).thenReturn(false);
+        long dueEpoch = due.atZone(ZONE).toEpochSecond();
+        scheduler.tick(dueEpoch - 1);
+        scheduler.tick(dueEpoch);
+
+        verify(triggerService, never()).triggerAsync(any(), any());
     }
 
     @Test
@@ -95,13 +137,14 @@ class TriggerSchedulerTest {
         TaskEntity task = task(1L, due);
         task.setStatus(TaskStatus.DISABLED);
         when(taskService.get(1L)).thenReturn(task);
+        when(leaderElectionService.isLeader()).thenReturn(true);
 
         scheduler.onTaskChanged(new TaskScheduleEvent(1L, false));
         long dueEpoch = due.atZone(ZONE).toEpochSecond();
         scheduler.tick(dueEpoch - 1);
         scheduler.tick(dueEpoch);
 
-        verify(triggerService, never()).triggerAsync(any());
+        verify(triggerService, never()).triggerAsync(any(), any());
     }
 
     @Test
@@ -109,6 +152,7 @@ class TriggerSchedulerTest {
         LocalDateTime due = LocalDateTime.now(ZONE).plusSeconds(5);
         TaskEntity task = task(1L, due);
         when(taskService.listSchedulable()).thenReturn(List.of(task));
+        when(leaderElectionService.isLeader()).thenReturn(true);
         scheduler.loadTasks();
 
         scheduler.onTaskChanged(new TaskScheduleEvent(1L, true));
@@ -116,7 +160,7 @@ class TriggerSchedulerTest {
         scheduler.tick(dueEpoch - 1);
         scheduler.tick(dueEpoch);
 
-        verify(triggerService, never()).triggerAsync(any());
+        verify(triggerService, never()).triggerAsync(any(), any());
     }
 
     private TaskEntity task(Long id, LocalDateTime nextTriggerTime) {

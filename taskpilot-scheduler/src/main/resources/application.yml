@@ -58,6 +58,14 @@ taskpilot:
       core-size: 4
       max-size: 16
       queue-capacity: 512
+    # 领导选举：集群里只让 leader 推时间轮。
+    election:
+      enabled: true
+      redis-address: redis://127.0.0.1:6379
+      lock-key: taskpilot:scheduler:leader
+      token-key: taskpilot:scheduler:fence:token
+      retry-interval-ms: 2000
+      lease-seconds: 30
   executor:
     heartbeat-timeout-seconds: 30
     health-check-interval-seconds: 10

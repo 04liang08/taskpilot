@@ -2,7 +2,7 @@
 
 分布式任务调度平台：**调度中心（scheduler）+ 执行器（executor）** 两段式架构。
 
-> 当前状态：第 2 周 Day 1 —— 自实现时间轮 + cron 定时触发已就绪（第 1 周全部完成）。
+> 当前状态：第 2 周 Day 3 —— 时间轮 + cron 定时触发 + 领导选举（Redisson 锁 + fencing token）已就绪。
 
 ## 1. 它解决什么问题
 
@@ -68,7 +68,9 @@
 docker compose -f deploy/docker-compose.yml up -d mysql redis nacos
 ```
 
-首次启动 MySQL 会自动执行 `deploy/sql/01-init.sql`，创建 `tp_task`、`tp_executor`、`tp_execution_log` 三张表。
+首次启动 MySQL 会自动执行 `deploy/sql/01-init.sql`，创建 `tp_task`、`tp_executor`、`tp_execution_log`、`tp_leader` 四张表。
+
+> 第 2 周 Day 3 起，调度中心需要 Redis 做领导选举；只起 MySQL 的话定时触发不会工作（单机开发可设 `taskpilot.scheduler.election.enabled=false`）。
 
 > 如果本机 3306 已被占用，先停止本地 MySQL 服务，或修改 compose 中的端口映射。
 > Nacos 启动较慢且当前应用不强依赖它，只起 MySQL 也能开发。
@@ -83,7 +85,7 @@ mysql -h 127.0.0.1 -P 3306 -u root -p < deploy/sql/01-init.sql
 ```
 
 - 数据库连接用环境变量覆盖：`TASKPILOT_MYSQL_URL`、`TASKPILOT_MYSQL_USERNAME`、`TASKPILOT_MYSQL_PASSWORD`。
-- Redis 从第 2 周（领导选举）开始才需要，届时用本机 `redis-server` 或容器都行。
+- Redis 从第 2 周（领导选举）开始才需要。Windows 上如果已经装成服务（`Get-Service *redis*` 显示 Running）直接用即可；否则 `redis-server --port 6379` 起一个。
 - 两个应用直接用 IDE 运行启动类，不需要打包部署。
 
 ### 5.2 构建
@@ -159,6 +161,19 @@ curl "http://localhost:8080/api/v1/executions?page=1&size=20"
 - 进程停机期间错过的触发**不补跑**，直接跳到下一个未来时间。
 - 同一任务不允许并发执行：手动触发撞上定时触发会返回 `40900`。
 
+集群模式（同一个库 + 同一个 Redis 启多个 scheduler）：
+
+```bash
+# 实例 A
+java -jar taskpilot-scheduler/target/taskpilot-scheduler-1.0.0-SNAPSHOT.jar --server.port=8080
+# 实例 B（共用 MySQL 与 Redis）
+java -jar taskpilot-scheduler/target/taskpilot-scheduler-1.0.0-SNAPSHOT.jar --server.port=8090
+```
+
+- 只有一个实例会成为 leader 并推时间轮，其余是 follower；leader 身份存在 `tp_leader` 表里。
+- leader 崩溃后约 30 秒（锁租约）另一个实例接管，token 递增，旧 leader 的写入会被 fencing 拒绝。
+- 不想装 Redis 的单机开发：`taskpilot.scheduler.election.enabled=false`，本实例直接充当 leader。
+
 相关入口：
 
 - Swagger UI：<http://localhost:8080/swagger-ui.html>
@@ -226,7 +241,7 @@ docker exec -it taskpilot-mysql mysql -utaskpilot -ptaskpilot \
 
 - [x] Day 1：自实现时间轮（1 秒粒度）+ cron 定时触发 + `next_trigger_time` 推进 + 重启重建
 - [ ] Day 2：错过触发的补偿策略、任务变更与时间轮联动
-- [ ] Day 3：领导选举（Redisson 锁 + fencing token）
+- [x] Day 3：领导选举（Redisson 锁 + fencing token）+ 双实例只触发一次
 - [ ] Day 4：调度状态持久化与重启补偿
 - [ ] Day 5：双 scheduler 实例验收（同一任务只触发一次）
 
@@ -247,6 +262,8 @@ docker exec -it taskpilot-mysql mysql -utaskpilot -ptaskpilot \
 6. **手动触发提示“没有可用的在线执行器”？** 先启动 `taskpilot-executor`，等执行器页面出现 `ONLINE`；触发失败也会留下一条 `FAILED` 执行记录。
 7. **任务触发提示“任务未启用”？** 手动触发只允许 `ENABLED` 任务，先在任务列表点击「启用」。
 8. **定时任务没触发？** 看调度中心日志里的 `time wheel loaded: N task(s)`：N 为 0 说明没有启用中的 cron 任务；再看任务列表的「下次触发」是否正常推进。cron 必须是 6 段（秒 分 时 日 月 周）。
+9. **多实例下定时任务不触发了？** 确认 Redis 可达（`redis-cli ping`），且 `tp_leader` 里有 leader 记录；日志里应出现 `became leader`。Redis 不可用时实例拿不到 leader 身份，会一直不触发（这是有意的失败关闭）。
+10. **leader 换了个实例后执行记录里的 leader 变了？** 正常。`tp_execution_log.leader_instance` / `fencing_token` 记录了每次触发由哪个 leader 产生。
 
 ## 10. Roadmap
 

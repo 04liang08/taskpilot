@@ -61,6 +61,15 @@ public class TimeWheel {
         return due;
     }
 
+    /**
+     * 清空时间轮（失去 leader 身份时调用）。
+     */
+    public void clear() {
+        for (Map<Long, Long> bucket : buckets) {
+            bucket.clear();
+        }
+    }
+
     public int size() {
         int total = 0;
         for (Map<Long, Long> bucket : buckets) {

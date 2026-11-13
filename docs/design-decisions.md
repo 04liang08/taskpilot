@@ -86,4 +86,30 @@
 **代价**：
 
 - 自己实现轮子要处理回补（进程卡顿后落后多秒）、错过触发（misfire）这些边界。当前策略：落后超过 `max-catch-up-seconds` 直接跳到当前秒；错过的触发**不补跑**，直接推进到下一个未来时间——避免重启后突然打出一串补跑的流量。
-- 目前是**单实例**语义：两个 scheduler 实例会各推各的轮子，同一任务被触发两次。这个问题靠领导选举（ADR 待补）解决，不是靠时间轮本身。
+- 目前是**单实例**语义：两个 scheduler 实例会各推各的轮子，同一任务被触发两次。这个问题靠领导选举解决（见 ADR-009）。
+
+## ADR-009：领导选举用 Redisson 锁 + MySQL 侧 fencing token
+
+**决策**：每个 scheduler 实例用 Redisson `RLock` 竞争 leader 身份；抢到锁后领一个单调递增的 fencing token（Redis 计数器与 MySQL 记录取较大值），写入 `tp_leader`；每次定时触发落库前先做 fencing 校验，token 落后于库里的值就拒绝本次写入。
+
+**原因**：
+
+- 分布式锁只能保证"同一时刻只有一个 leader"。但 leader 遇到长 GC、网络分区、进程暂停后恢复时，**它可能还认为自己持有锁**（Redis 侧锁已过期被别人接管），于是出现脑裂：两个实例同时触发同一个任务。锁本身挡不住这种情况。
+- fencing token 解决的是"过期 leader 复活后继续写"：token 在存储侧单调递增，旧 leader 带着小 token 写库时被直接拒绝。这是 Martin Kleppmann 讨论 fencing 的标准做法。
+- token 落 MySQL 而不是只放 Redis，是因为**被保护的数据也在 MySQL**：只有把 token 写到和业务数据同一个存储里，才能在存储侧原子地拒绝旧写入。
+- token 取 `max(Redis 计数器, DB 记录 + 1)`：Redis 重启导致计数器归零时，token 也不会倒退。
+
+**实测（双 scheduler 实例 + Redis + MySQL）**：
+
+| 场景 | 结果 |
+|---|---|
+| 两个实例同时运行 | 只有 1 个成为 leader；10 秒 cron 在 35 秒内产生 **3 条**记录（未翻倍） |
+| 强杀 leader | 约 26 秒后另一个实例接管（锁租约 30 秒 + 竞选间隔 2 秒），token 从 1 变 2，重新加载时间轮继续触发 |
+| 接管窗口内的触发 | **跳过不补跑**（宁可漏一次也不重复执行） |
+| 人为把库里 token 改大（旧 leader 变僵尸） | 旧 leader 的触发全部被拒（`40900 fencing token 失效`），执行记录数不再增长 |
+
+**代价**：
+
+- 每次定时触发多一次 `UPDATE tp_leader`（fencing 校验）。这点开销换来了"旧 leader 写不进来"的硬保证，值得。
+- leader 切换期间（租约过期到接管完成）会漏掉触发。当前选择是**漏而不是重**，因为重复执行的业务代价通常更高；需要补跑的话要在业务侧做幂等。
+- 执行器目前只注册到一个 scheduler（`taskpilot.executor.scheduler-base-url` 是单地址）。scheduler 挂掉后执行器心跳会断、变成 OFFLINE，需要执行器支持多注册中心或走服务发现——这是 Week 3 "执行器上下线"要处理的。

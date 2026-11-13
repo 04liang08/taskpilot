@@ -11,6 +11,8 @@ import com.taskpilot.scheduler.client.ExecutorClient;
 import com.taskpilot.scheduler.entity.ExecutionLogEntity;
 import com.taskpilot.scheduler.entity.ExecutorEntity;
 import com.taskpilot.scheduler.entity.TaskEntity;
+import com.taskpilot.scheduler.leader.LeaderContext;
+import com.taskpilot.scheduler.leader.LeaderStateService;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
@@ -53,6 +55,9 @@ class TriggerServiceTest {
     private ExecutorClient executorClient;
 
     @Mock
+    private LeaderStateService leaderStateService;
+
+    @Mock
     private ThreadPoolTaskExecutor triggerExecutor;
 
     @InjectMocks
@@ -68,7 +73,8 @@ class TriggerServiceTest {
         finished.setDurationMs(9L);
         when(taskService.get(1L)).thenReturn(task);
         when(executorService.listOnline()).thenReturn(List.of(executor));
-        when(executionService.createRunning(task, executor, TriggerType.MANUAL)).thenReturn(running);
+        when(executionService.createRunning(eq(task), eq(executor), eq(TriggerType.MANUAL), any()))
+                .thenReturn(running);
         when(executorClient.execute(eq("127.0.0.1:8081"), any(ExecuteRequest.class)))
                 .thenReturn(ExecuteResult.success("ok", 9));
         when(executionService.complete(eq(running), any(ExecuteResult.class))).thenReturn(finished);
@@ -104,7 +110,7 @@ class TriggerServiceTest {
         failed.setStatus(ExecutionStatus.FAILED);
         when(taskService.get(1L)).thenReturn(task);
         when(executorService.listOnline()).thenReturn(List.of());
-        when(executionService.createFailed(eq(task), anyString())).thenReturn(failed);
+        when(executionService.createFailed(eq(task), anyString(), any())).thenReturn(failed);
 
         assertThatThrownBy(() -> triggerService.trigger(1L))
                 .isInstanceOf(BizException.class)
@@ -112,7 +118,7 @@ class TriggerServiceTest {
                         .isEqualTo(ErrorCode.EXECUTOR_UNAVAILABLE.getCode()))
                 .hasMessageContaining("执行记录 ID=201");
 
-        verify(executionService).createFailed(eq(task), eq("没有可用的在线执行器"));
+        verify(executionService).createFailed(eq(task), eq("没有可用的在线执行器"), any());
         verify(executorClient, never()).execute(anyString(), any(ExecuteRequest.class));
     }
 
@@ -125,7 +131,8 @@ class TriggerServiceTest {
         failed.setStatus(ExecutionStatus.FAILED);
         when(taskService.get(1L)).thenReturn(task);
         when(executorService.listOnline()).thenReturn(List.of(executor));
-        when(executionService.createRunning(task, executor, TriggerType.MANUAL)).thenReturn(running);
+        when(executionService.createRunning(eq(task), eq(executor), eq(TriggerType.MANUAL), any()))
+                .thenReturn(running);
         when(executorClient.execute(eq("127.0.0.1:8081"), any(ExecuteRequest.class)))
                 .thenThrow(new ResourceAccessException("Connection refused"));
         when(executionService.markFailed(eq(running), anyString())).thenReturn(failed);
@@ -146,7 +153,8 @@ class TriggerServiceTest {
         ExecutionLogEntity running = runningExecution(203L);
         when(taskService.get(1L)).thenReturn(task);
         when(executorService.listOnline()).thenReturn(List.of(executor));
-        when(executionService.createRunning(task, executor, TriggerType.MANUAL)).thenReturn(running);
+        when(executionService.createRunning(eq(task), eq(executor), eq(TriggerType.MANUAL), any()))
+                .thenReturn(running);
         when(executorClient.execute(eq("127.0.0.1:8081"), any(ExecuteRequest.class)))
                 .thenAnswer(invocation -> {
                     entered.countDown();

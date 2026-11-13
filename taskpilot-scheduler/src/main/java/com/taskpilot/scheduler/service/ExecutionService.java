@@ -13,6 +13,7 @@ import com.taskpilot.scheduler.dto.ExecutionQuery;
 import com.taskpilot.scheduler.entity.ExecutionLogEntity;
 import com.taskpilot.scheduler.entity.ExecutorEntity;
 import com.taskpilot.scheduler.entity.TaskEntity;
+import com.taskpilot.scheduler.leader.LeaderContext;
 import com.taskpilot.scheduler.mapper.ExecutionLogMapper;
 import org.springframework.stereotype.Service;
 
@@ -39,7 +40,10 @@ public class ExecutionService {
     /**
      * 手动触发先插入 RUNNING 记录。execution_key 使用 UUID，允许重复手动触发。
      */
-    public ExecutionLogEntity createRunning(TaskEntity task, ExecutorEntity executor, TriggerType triggerType) {
+    public ExecutionLogEntity createRunning(TaskEntity task,
+                                            ExecutorEntity executor,
+                                            TriggerType triggerType,
+                                            LeaderContext leaderContext) {
         LocalDateTime now = LocalDateTime.now();
         ExecutionLogEntity entity = new ExecutionLogEntity();
         entity.setExecutionKey(UUID.randomUUID().toString());
@@ -54,6 +58,8 @@ public class ExecutionService {
         entity.setShardTotal(task.getShardTotal() == null ? 1 : task.getShardTotal());
         entity.setStatus(ExecutionStatus.RUNNING);
         entity.setRetryCount(0);
+        entity.setFencingToken(leaderContext.fencingToken());
+        entity.setLeaderInstance(leaderContext.instanceId());
         executionLogMapper.insert(entity);
         return entity;
     }
@@ -61,7 +67,7 @@ public class ExecutionService {
     /**
      * 调度前就失败（例如没有在线执行器），也保留一条 FAILED 记录，便于页面追溯。
      */
-    public ExecutionLogEntity createFailed(TaskEntity task, String errorMessage) {
+    public ExecutionLogEntity createFailed(TaskEntity task, String errorMessage, LeaderContext leaderContext) {
         LocalDateTime now = LocalDateTime.now();
         ExecutionLogEntity entity = new ExecutionLogEntity();
         entity.setExecutionKey(UUID.randomUUID().toString());
@@ -75,6 +81,8 @@ public class ExecutionService {
         entity.setShardTotal(task.getShardTotal() == null ? 1 : task.getShardTotal());
         entity.setStatus(ExecutionStatus.FAILED);
         entity.setRetryCount(0);
+        entity.setFencingToken(leaderContext.fencingToken());
+        entity.setLeaderInstance(leaderContext.instanceId());
         entity.setDurationMs(0L);
         entity.setErrorMessage(truncate(errorMessage, ERROR_MESSAGE_MAX_LENGTH));
         executionLogMapper.insert(entity);

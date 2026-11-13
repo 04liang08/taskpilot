@@ -66,6 +66,8 @@ CREATE TABLE IF NOT EXISTS tp_execution_log (
   status VARCHAR(16) NOT NULL DEFAULT 'RUNNING'
     COMMENT 'RUNNING/SUCCESS/FAILED/TIMEOUT/CANCELED',
   retry_count INT NOT NULL DEFAULT 0,
+  fencing_token BIGINT NOT NULL DEFAULT 0 COMMENT '产生该记录的 leader fencing token',
+  leader_instance VARCHAR(64) NULL COMMENT '产生该记录的调度实例',
   duration_ms BIGINT NULL,
   error_message TEXT NULL,
   result_summary VARCHAR(1024) NULL,
@@ -78,3 +80,18 @@ CREATE TABLE IF NOT EXISTS tp_execution_log (
   KEY idx_status_create (status, create_time),
   KEY idx_executor (executor_id)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COMMENT = '执行记录';
+
+-- 调度集群 leader 状态（单行表，id 固定为 1）。
+-- fencing_token 单调递增：旧 leader 即使还持有过期的分布式锁，写操作也会被这里拒绝。
+CREATE TABLE IF NOT EXISTS tp_leader (
+  id INT NOT NULL DEFAULT 1 COMMENT '固定为 1，单行表',
+  instance_id VARCHAR(64) NOT NULL COMMENT '当前 leader 实例标识',
+  fencing_token BIGINT NOT NULL DEFAULT 0 COMMENT 'fencing token，单调递增',
+  leader_time DATETIME(3) NOT NULL COMMENT '成为 leader 的时间',
+  fence_check_time DATETIME(3) NULL COMMENT '最近一次 fencing 校验时间',
+  fence_seq BIGINT NOT NULL DEFAULT 0 COMMENT 'fencing 校验计数器，保证每次校验都会改动行',
+  create_time DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  update_time DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3)
+    ON UPDATE CURRENT_TIMESTAMP(3),
+  PRIMARY KEY (id)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COMMENT = '调度集群 leader 与 fencing token';

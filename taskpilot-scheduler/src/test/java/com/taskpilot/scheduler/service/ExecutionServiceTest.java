@@ -7,6 +7,7 @@ import com.taskpilot.common.enums.TriggerType;
 import com.taskpilot.scheduler.entity.ExecutionLogEntity;
 import com.taskpilot.scheduler.entity.ExecutorEntity;
 import com.taskpilot.scheduler.entity.TaskEntity;
+import com.taskpilot.scheduler.leader.LeaderContext;
 import com.taskpilot.scheduler.mapper.ExecutionLogMapper;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -38,7 +39,8 @@ class ExecutionServiceTest {
             return 1;
         });
 
-        ExecutionLogEntity execution = executionService.createRunning(task(), executor(), TriggerType.MANUAL);
+        ExecutionLogEntity execution = executionService.createRunning(task(), executor(), TriggerType.MANUAL,
+                LeaderContext.none());
 
         assertThat(execution.getId()).isEqualTo(100L);
         assertThat(execution.getExecutionKey()).isNotBlank();
@@ -109,7 +111,7 @@ class ExecutionServiceTest {
             return 1;
         });
 
-        ExecutionLogEntity execution = executionService.createFailed(task(), "没有可用的在线执行器");
+        ExecutionLogEntity execution = executionService.createFailed(task(), "没有可用的在线执行器", LeaderContext.none());
 
         verify(executionLogMapper).insert(captor.capture());
         assertThat(captor.getValue().getStatus()).isEqualTo(ExecutionStatus.FAILED);

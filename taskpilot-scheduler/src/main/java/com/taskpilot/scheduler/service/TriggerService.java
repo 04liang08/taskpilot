@@ -10,6 +10,8 @@ import com.taskpilot.scheduler.client.ExecutorClient;
 import com.taskpilot.scheduler.entity.ExecutionLogEntity;
 import com.taskpilot.scheduler.entity.ExecutorEntity;
 import com.taskpilot.scheduler.entity.TaskEntity;
+import com.taskpilot.scheduler.leader.LeaderContext;
+import com.taskpilot.scheduler.leader.LeaderStateService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -39,6 +41,7 @@ public class TriggerService {
     private final ExecutorService executorService;
     private final ExecutionService executionService;
     private final ExecutorClient executorClient;
+    private final LeaderStateService leaderStateService;
     private final ThreadPoolTaskExecutor triggerExecutor;
     private final AtomicInteger roundRobin = new AtomicInteger();
     /**
@@ -51,22 +54,25 @@ public class TriggerService {
                           ExecutorService executorService,
                           ExecutionService executionService,
                           ExecutorClient executorClient,
+                          LeaderStateService leaderStateService,
                           @Qualifier("triggerExecutor") ThreadPoolTaskExecutor triggerExecutor) {
         this.taskService = taskService;
         this.executorService = executorService;
         this.executionService = executionService;
         this.executorClient = executorClient;
+        this.leaderStateService = leaderStateService;
         this.triggerExecutor = triggerExecutor;
     }
 
     /**
      * 定时触发入口：异步执行，时间轮线程只负责发起，不等待结果。
+     * <p>leaderContext 携带 fencing token，写库前会校验，旧 leader 的写入会被拒绝。</p>
      */
-    public void triggerAsync(Long taskId) {
+    public void triggerAsync(Long taskId, LeaderContext leaderContext) {
         try {
             triggerExecutor.execute(() -> {
                 try {
-                    doTrigger(taskId, TriggerType.CRON);
+                    doTrigger(taskId, TriggerType.CRON, leaderContext);
                 } catch (BizException e) {
                     log.warn("scheduled trigger rejected: taskId={}, code={}, message={}",
                             taskId, e.getCode(), e.getMessage());
@@ -81,36 +87,41 @@ public class TriggerService {
     }
 
     public ExecutionLogEntity trigger(Long taskId) {
-        return doTrigger(taskId, TriggerType.MANUAL);
+        return doTrigger(taskId, TriggerType.MANUAL, LeaderContext.none());
     }
 
-    private ExecutionLogEntity doTrigger(Long taskId, TriggerType triggerType) {
+    private ExecutionLogEntity doTrigger(Long taskId, TriggerType triggerType, LeaderContext leaderContext) {
         if (!runningTasks.add(taskId)) {
             throw new BizException(ErrorCode.CONFLICT, "任务正在执行中，请稍后再试: " + taskId);
         }
         try {
-            return executeTrigger(taskId, triggerType);
+            return executeTrigger(taskId, triggerType, leaderContext);
         } finally {
             runningTasks.remove(taskId);
         }
     }
 
-    private ExecutionLogEntity executeTrigger(Long taskId, TriggerType triggerType) {
+    private ExecutionLogEntity executeTrigger(Long taskId, TriggerType triggerType, LeaderContext leaderContext) {
         TaskEntity task = taskService.get(taskId);
         if (task.getStatus() != TaskStatus.ENABLED) {
             throw new BizException(ErrorCode.BAD_REQUEST, "任务未启用，无法触发: " + taskId);
         }
+        // fencing 校验：锁过期但仍以为自己 leader 的实例，写库时会被这里拒绝。
+        if (leaderContext.fenced() && !leaderStateService.checkFence(leaderContext.fencingToken())) {
+            throw new BizException(ErrorCode.CONFLICT,
+                    "本实例已不是 leader（fencing token 失效），放弃本次触发: taskId=" + taskId);
+        }
 
         List<ExecutorEntity> onlineExecutors = executorService.listOnline();
         if (onlineExecutors.isEmpty()) {
-            ExecutionLogEntity failed = executionService.createFailed(task, "没有可用的在线执行器");
+            ExecutionLogEntity failed = executionService.createFailed(task, "没有可用的在线执行器", leaderContext);
             throw new BizException(ErrorCode.EXECUTOR_UNAVAILABLE,
                     "没有可用的在线执行器，执行记录 ID=" + failed.getId() + "（FAILED）");
         }
 
         ExecutorEntity executor = onlineExecutors.get(
                 Math.floorMod(roundRobin.getAndIncrement(), onlineExecutors.size()));
-        ExecutionLogEntity execution = executionService.createRunning(task, executor, triggerType);
+        ExecutionLogEntity execution = executionService.createRunning(task, executor, triggerType, leaderContext);
         taskService.markTriggered(taskId);
 
         ExecuteRequest request = new ExecuteRequest(

@@ -29,6 +29,8 @@ public class SchedulerProperties {
 
     private TriggerPool triggerPool = new TriggerPool();
 
+    private Election election = new Election();
+
     @Getter
     @Setter
     public static class TriggerPool {
@@ -38,5 +40,34 @@ public class SchedulerProperties {
         private int maxSize = 16;
 
         private int queueCapacity = 512;
+    }
+
+    /**
+     * 领导选举配置。单机开发可以关掉 election.enabled，此时本实例恒为 leader 且不做 fencing 校验。
+     */
+    @Getter
+    @Setter
+    public static class Election {
+
+        /**
+         * 是否启用领导选举。关掉后本实例直接充当 leader。
+         */
+        private boolean enabled = true;
+
+        private String redisAddress = "redis://127.0.0.1:6379";
+
+        private String lockKey = "taskpilot:scheduler:leader";
+
+        private String tokenKey = "taskpilot:scheduler:fence:token";
+
+        /**
+         * 竞选间隔（毫秒）。
+         */
+        private long retryIntervalMs = 2000;
+
+        /**
+         * 锁租约（秒）。Redisson watchdog 会自动续期，这里只是兜底上限。
+         */
+        private long leaseSeconds = 30;
     }
 }

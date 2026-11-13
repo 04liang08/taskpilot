@@ -49,6 +49,10 @@ public class ExecutionLogEntity {
 
     private Integer retryCount;
 
+    private Long fencingToken;
+
+    private String leaderInstance;
+
     private Long durationMs;
 
     private String errorMessage;
