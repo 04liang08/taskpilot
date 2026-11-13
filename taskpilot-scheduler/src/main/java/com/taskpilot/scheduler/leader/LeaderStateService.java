@@ -64,10 +64,17 @@ public class LeaderStateService {
     }
 
     /**
+     * 当前 leader 记录；没有 leader 时返回 null（例如选举未完成或还没人竞选成功）。
+     */
+    public LeaderEntity currentLeader() {
+        return leaderMapper.selectById(LEADER_ROW_ID);
+    }
+
+    /**
      * 库里记录的 token。用于和 Redis 的计数器取较大值，防止 Redis 重启后 token 倒退。
      */
     public long currentToken() {
-        LeaderEntity entity = leaderMapper.selectById(LEADER_ROW_ID);
+        LeaderEntity entity = currentLeader();
         return entity == null || entity.getFencingToken() == null ? 0L : entity.getFencingToken();
     }
 }

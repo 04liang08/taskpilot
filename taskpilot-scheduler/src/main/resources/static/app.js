@@ -114,6 +114,8 @@ async function loadOverview() {
     $('#stat-success').textContent = data.todaySuccess;
     $('#stat-failed').textContent = data.todayFailed;
     $('#stat-running').textContent = data.runningCount;
+    $('#stat-leader').textContent = data.leaderInstance || '选举中';
+    $('#stat-leader-since').textContent = data.leaderSince ? `自 ${formatDateTime(data.leaderSince)}` : '';
   } catch (error) {
     toast(error.message, 'error');
   }

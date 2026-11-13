@@ -70,6 +70,19 @@ public class TimeWheel {
         }
     }
 
+    /**
+     * 查某个任务当前排在轮子里的触发时间；不在轮子里返回 null。
+     */
+    public Long scheduledTimeOf(long taskId) {
+        for (Map<Long, Long> bucket : buckets) {
+            Long scheduled = bucket.get(taskId);
+            if (scheduled != null) {
+                return scheduled;
+            }
+        }
+        return null;
+    }
+
     public int size() {
         int total = 0;
         for (Map<Long, Long> bucket : buckets) {

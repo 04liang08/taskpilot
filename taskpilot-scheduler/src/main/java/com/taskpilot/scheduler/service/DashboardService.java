@@ -7,7 +7,9 @@ import com.taskpilot.common.enums.TaskStatus;
 import com.taskpilot.scheduler.dto.DashboardSummary;
 import com.taskpilot.scheduler.entity.ExecutionLogEntity;
 import com.taskpilot.scheduler.entity.ExecutorEntity;
+import com.taskpilot.scheduler.entity.LeaderEntity;
 import com.taskpilot.scheduler.entity.TaskEntity;
+import com.taskpilot.scheduler.leader.LeaderStateService;
 import com.taskpilot.scheduler.mapper.ExecutionLogMapper;
 import com.taskpilot.scheduler.mapper.ExecutorMapper;
 import com.taskpilot.scheduler.mapper.TaskMapper;
@@ -23,13 +25,16 @@ public class DashboardService {
     private final TaskMapper taskMapper;
     private final ExecutorMapper executorMapper;
     private final ExecutionLogMapper executionLogMapper;
+    private final LeaderStateService leaderStateService;
 
     public DashboardService(TaskMapper taskMapper,
                             ExecutorMapper executorMapper,
-                            ExecutionLogMapper executionLogMapper) {
+                            ExecutionLogMapper executionLogMapper,
+                            LeaderStateService leaderStateService) {
         this.taskMapper = taskMapper;
         this.executorMapper = executorMapper;
         this.executionLogMapper = executionLogMapper;
+        this.leaderStateService = leaderStateService;
     }
 
     public DashboardSummary summary() {
@@ -51,7 +56,12 @@ public class DashboardService {
         long runningCount = executionLogMapper.selectCount(Wrappers.<ExecutionLogEntity>lambdaQuery()
                 .eq(ExecutionLogEntity::getStatus, ExecutionStatus.RUNNING));
 
+        // 当前 leader 来自共享的 tp_leader，任何实例读到的都是集群视角。
+        LeaderEntity leader = leaderStateService.currentLeader();
+        String leaderInstance = leader == null ? null : leader.getInstanceId();
+        LocalDateTime leaderSince = leader == null ? null : leader.getLeaderTime();
+
         return new DashboardSummary(taskCount, enabledTaskCount, onlineExecutorCount,
-                todaySuccess, todayFailed, runningCount);
+                todaySuccess, todayFailed, runningCount, leaderInstance, leaderSince);
     }
 }

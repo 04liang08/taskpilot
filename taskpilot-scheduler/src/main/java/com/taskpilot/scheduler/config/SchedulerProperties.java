@@ -3,6 +3,7 @@ package com.taskpilot.scheduler.config;
 import lombok.Getter;
 import lombok.Setter;
 import org.springframework.boot.context.properties.ConfigurationProperties;
+import com.taskpilot.scheduler.schedule.MisfirePolicy;
 
 /**
  * 调度中心自身的调度参数，对应 taskpilot.scheduler。
@@ -26,6 +27,22 @@ public class SchedulerProperties {
      * 单次 tick 最多回补多少秒。落后太多（进程长时间挂起）时直接跳到当前秒，避免空转。
      */
     private int maxCatchUpSeconds = 300;
+
+    /**
+     * 错过触发（进程停机期间到点）的补偿策略。
+     */
+    private MisfirePolicy misfirePolicy = MisfirePolicy.SKIP;
+
+    /**
+     * 补跑阈值（秒）。落后超过这个时间的错过触发不再补跑，避免启动时打出一串历史触发。
+     */
+    private int misfireThresholdSeconds = 300;
+
+    /**
+     * leader 与 DB 对齐任务列表的间隔（毫秒）。
+     * <p>任务事件只在进程内传播，别的实例创建的任务靠这个周期同步过来。</p>
+     */
+    private long taskSyncIntervalMs = 5000;
 
     private TriggerPool triggerPool = new TriggerPool();
 

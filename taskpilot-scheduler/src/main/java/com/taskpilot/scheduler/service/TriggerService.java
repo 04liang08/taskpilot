@@ -136,7 +136,8 @@ public class TriggerService {
         try {
             ExecuteResult result = executorClient.execute(executor.getAddress(), request);
             ExecutionLogEntity finished = executionService.complete(execution, result);
-            log.info("manual trigger finished: taskId={}, executionId={}, executor={}, status={}, durationMs={}",
+            log.info("{} finished: taskId={}, executionId={}, executor={}, status={}, durationMs={}",
+                    triggerType == TriggerType.CRON ? "scheduled trigger" : "manual trigger",
                     taskId, execution.getId(), executor.getAddress(),
                     finished.getStatus(), finished.getDurationMs());
             return finished;

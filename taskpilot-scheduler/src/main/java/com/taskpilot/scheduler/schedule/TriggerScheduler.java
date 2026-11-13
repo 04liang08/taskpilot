@@ -20,10 +20,15 @@ import org.springframework.stereotype.Component;
 import org.springframework.transaction.event.TransactionPhase;
 import org.springframework.transaction.event.TransactionalEventListener;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -54,9 +59,13 @@ public class TriggerScheduler {
     private final TimeWheel wheel;
     private final long tickMillis;
     private final int maxCatchUpSeconds;
+    private final MisfirePolicy misfirePolicy;
+    private final int misfireThresholdSeconds;
+    private final long taskSyncIntervalMillis;
 
     private final Map<Long, ScheduledTask> cache = new ConcurrentHashMap<>();
     private final AtomicLong lastTickSecond = new AtomicLong();
+    private final AtomicLong lastSyncSecond = new AtomicLong();
     private ScheduledExecutorService ticker;
 
     public TriggerScheduler(TaskService taskService,
@@ -71,18 +80,25 @@ public class TriggerScheduler {
         this.wheel = new TimeWheel(properties.getWheelSize());
         this.tickMillis = properties.getTickMillis();
         this.maxCatchUpSeconds = properties.getMaxCatchUpSeconds();
+        this.misfirePolicy = properties.getMisfirePolicy();
+        this.misfireThresholdSeconds = properties.getMisfireThresholdSeconds();
+        this.taskSyncIntervalMillis = properties.getTaskSyncIntervalMs();
     }
 
     @EventListener(ApplicationReadyEvent.class)
     public void onReady() {
-        loadTasks();
+        // 只启动轮子；时间轮由 leader 身份事件触发装载（见 onLeaderChanged）。
         startTicker();
     }
 
     /**
      * 从 DB 装载可调度任务，重建时间轮。重启补偿依赖这里。
+     * <p>只有 leader 才装载：follower 推轮子没有意义。</p>
      */
     public void loadTasks() {
+        if (!leaderElectionService.isLeader()) {
+            return;
+        }
         for (TaskEntity task : taskService.listSchedulable()) {
             scheduleTask(task);
         }
@@ -91,11 +107,18 @@ public class TriggerScheduler {
 
     /**
      * 任务定义变化后重排。放在事务提交后执行，避免读到未提交的数据。
+     * <p>注意：任务可能是在别的实例上创建的，本地事件只覆盖本地；
+     * leader 靠 {@link #syncTasks()} 定期与 DB 对齐，才能拿到其他实例创建的任务。</p>
      */
     @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
     public void onTaskChanged(TaskScheduleEvent event) {
         Long taskId = event.taskId();
         if (event.deleted()) {
+            remove(taskId);
+            return;
+        }
+        if (!leaderElectionService.isLeader()) {
+            // follower 不推轮子，等下次同步时由 leader 统一排。
             remove(taskId);
             return;
         }
@@ -111,6 +134,36 @@ public class TriggerScheduler {
             return;
         }
         scheduleTask(task);
+    }
+
+    /**
+     * 与 DB 对齐任务列表。
+     * <p>leader 需要知道「所有」实例上创建的任务——任务事件只在本地进程内传播，
+     * 所以这里定期全量对齐一次：DB 里新增的任务排进轮子，DB 里消失的任务移出轮子。</p>
+     * <p>已经在轮子里且 cron 没变的任务不动，避免每轮重写 next_trigger_time 造成节奏漂移。</p>
+     */
+    public void syncTasks() {
+        if (!leaderElectionService.isLeader()) {
+            return;
+        }
+        List<TaskEntity> tasks = taskService.listSchedulable();
+        Set<Long> seen = new HashSet<>();
+        for (TaskEntity task : tasks) {
+            seen.add(task.getId());
+            ScheduledTask cached = cache.get(task.getId());
+            Long scheduled = wheel.scheduledTimeOf(task.getId());
+            if (cached != null && scheduled != null
+                    && cached.cronExpression().equals(task.getCronExpression())) {
+                // 已在轮子里且 cron 没变：保持原样，避免重置 next_trigger_time。
+                continue;
+            }
+            scheduleTask(task);
+        }
+        for (Long taskId : new ArrayList<>(cache.keySet())) {
+            if (!seen.contains(taskId)) {
+                remove(taskId);
+            }
+        }
     }
 
     /**
@@ -140,12 +193,10 @@ public class TriggerScheduler {
             return;
         }
         long last = lastTickSecond.getAndSet(nowEpochSecond);
-        if (last <= 0) {
-            // 第一轮只记录基准时间。
-            return;
-        }
-        long from = last + 1;
-        if (nowEpochSecond - last > maxCatchUpSeconds) {
+        // 第一轮（刚启动或刚拿到 leader）也要扫当前这一格：
+        // 补跑任务落在过去的时间槽里，不扫就会一直等到该槽位再次轮转（最多 60 秒）。
+        long from = last <= 0 ? nowEpochSecond : last + 1;
+        if (last > 0 && nowEpochSecond - last > maxCatchUpSeconds) {
             from = nowEpochSecond;
             log.warn("time wheel lagged {}s, skip catch-up", nowEpochSecond - last);
         }
@@ -154,6 +205,26 @@ public class TriggerScheduler {
             for (Map.Entry<Long, Long> entry : due.entrySet()) {
                 fire(entry.getKey(), entry.getValue());
             }
+        }
+        maybeSyncTasks(nowEpochSecond);
+    }
+
+    /**
+     * 定期与 DB 对齐任务列表（把其他实例上创建的任务收进来）。
+     */
+    private void maybeSyncTasks(long nowEpochSecond) {
+        if (taskSyncIntervalMillis <= 0) {
+            return;
+        }
+        long last = lastSyncSecond.get();
+        if (last != 0 && nowEpochSecond - last < taskSyncIntervalMillis / 1000) {
+            return;
+        }
+        lastSyncSecond.set(nowEpochSecond);
+        try {
+            syncTasks();
+        } catch (Exception e) {
+            log.error("sync tasks from db failed", e);
         }
     }
 
@@ -187,12 +258,22 @@ public class TriggerScheduler {
         LeaderContext leaderContext = leaderElectionService.currentContext();
         triggerService.triggerAsync(taskId, leaderContext);
 
-        LocalDateTime next = cronService.nextTimeAfter(
-                scheduled.cronExpression(), toLocalDateTime(scheduledEpochSecond));
+        LocalDateTime scheduledTime = toLocalDateTime(scheduledEpochSecond);
+        LocalDateTime now = LocalDateTime.now(ZONE);
+        LocalDateTime next = cronService.nextTimeAfter(scheduled.cronExpression(), scheduledTime);
         if (next == null) {
             log.warn("cron will never fire again: taskId={}, cron={}", taskId, scheduled.cronExpression());
             cache.remove(taskId);
             return;
+        }
+        if (!next.isAfter(now)) {
+            // 补跑场景：cron.next(计划时间) 仍落在过去，继续用它会连着补跑一串历史触发。
+            // 直接推进到第一个未来时间，保证只补一次。
+            next = cronService.nextTimeAfter(scheduled.cronExpression(), now);
+            if (next == null) {
+                cache.remove(taskId);
+                return;
+            }
         }
         wheel.schedule(taskId, toEpochSecond(next));
         taskService.updateNextTriggerTime(taskId, next);
@@ -201,10 +282,22 @@ public class TriggerScheduler {
     private void scheduleTask(TaskEntity task) {
         LocalDateTime base = LocalDateTime.now(ZONE);
         LocalDateTime stored = task.getNextTriggerTime();
-        // 持久化的下次触发时间还在未来就沿用；已经过期说明中间停过（错过了），直接跳到下一个未来时间，不补跑。
-        LocalDateTime next = stored != null && stored.isAfter(base)
-                ? stored
-                : cronService.nextTimeAfter(task.getCronExpression(), base);
+        boolean alreadyScheduled = cache.containsKey(task.getId());
+        LocalDateTime next;
+        if (stored != null && stored.isAfter(base)) {
+            // 正常：沿用持久化的下次触发时间。
+            next = stored;
+        } else if (alreadyScheduled) {
+            // 已经在轮子里：说明刚错过一次，直接推进到未来，不重复补跑。
+            next = cronService.nextTimeAfter(task.getCronExpression(), base);
+        } else if (stored != null && shouldCatchUp(stored, base)) {
+            // 补跑：落后在阈值内，立即触发一次，然后把下次时间推进到未来。
+            catchUpTask(task, stored, base);
+            return;
+        } else {
+            // 跳过：错过的触发不补跑，直接推进到下一个未来时间。
+            next = cronService.nextTimeAfter(task.getCronExpression(), base);
+        }
         if (next == null) {
             log.warn("task has no next trigger time: taskId={}, cron={}", task.getId(), task.getCronExpression());
             remove(task.getId());
@@ -213,6 +306,35 @@ public class TriggerScheduler {
         cache.put(task.getId(), new ScheduledTask(task.getId(), task.getTaskName(), task.getCronExpression()));
         wheel.schedule(task.getId(), toEpochSecond(next));
         taskService.updateNextTriggerTime(task.getId(), next);
+    }
+
+    /**
+     * 补跑一次错过的触发，然后推进到下一个未来时间。
+     * <p>立即触发而不是塞回过去的时间槽：过去的时间槽要等轮转回来（最多 60 秒）才会被扫到。</p>
+     */
+    private void catchUpTask(TaskEntity task, LocalDateTime scheduled, LocalDateTime now) {
+        log.info("misfire catch-up: taskId={}, scheduled={}, now={}", task.getId(), scheduled, now);
+        cache.put(task.getId(), new ScheduledTask(task.getId(), task.getTaskName(), task.getCronExpression()));
+        triggerService.triggerAsync(task.getId(), leaderElectionService.currentContext());
+
+        LocalDateTime next = cronService.nextTimeAfter(task.getCronExpression(), now);
+        if (next == null) {
+            cache.remove(task.getId());
+            return;
+        }
+        wheel.schedule(task.getId(), toEpochSecond(next));
+        taskService.updateNextTriggerTime(task.getId(), next);
+    }
+
+    /**
+     * 是否补跑错过的触发：策略允许，且落后时间在阈值内。
+     */
+    private boolean shouldCatchUp(LocalDateTime scheduled, LocalDateTime now) {
+        if (misfirePolicy != MisfirePolicy.FIRE_ONCE) {
+            return false;
+        }
+        long lagSeconds = Duration.between(scheduled, now).getSeconds();
+        return lagSeconds > 0 && lagSeconds <= misfireThresholdSeconds;
     }
 
     private void remove(Long taskId) {

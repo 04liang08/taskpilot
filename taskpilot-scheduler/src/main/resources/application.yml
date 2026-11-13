@@ -54,6 +54,9 @@ taskpilot:
     tick-millis: 1000
     # 进程长时间挂起后最多回补多少秒；落后太多直接跳到当前秒。
     max-catch-up-seconds: 300
+    # 进程停机期间错过触发的补偿策略：SKIP 跳过 / FIRE_ONCE 补跑一次。
+    misfire-policy: SKIP
+    misfire-threshold-seconds: 300
     trigger-pool:
       core-size: 4
       max-size: 16
