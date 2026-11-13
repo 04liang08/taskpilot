@@ -158,8 +158,9 @@ curl "http://localhost:8080/api/v1/executions?page=1&size=20"
 ```
 
 - 时间轮只扫描当前秒的槽位，不做每秒全表扫描；`next_trigger_time` 落在 `tp_task` 里，重启后自动重建。
-- 进程停机期间错过的触发**不补跑**，直接跳到下一个未来时间。
+- 进程停机期间错过的触发默认**不补跑**（`taskpilot.scheduler.misfire-policy=SKIP`）；需要补一次可设 `FIRE_ONCE`，落后超过 `misfire-threshold-seconds` 仍不补。
 - 同一任务不允许并发执行：手动触发撞上定时触发会返回 `40900`。
+- 任务定义变更靠 leader 每 5 秒与 DB 对账同步到集群，新建任务最多延迟 5 秒生效。
 
 集群模式（同一个库 + 同一个 Redis 启多个 scheduler）：
 
@@ -174,18 +175,44 @@ java -jar taskpilot-scheduler/target/taskpilot-scheduler-1.0.0-SNAPSHOT.jar --se
 - leader 崩溃后约 30 秒（锁租约）另一个实例接管，token 递增，旧 leader 的写入会被 fencing 拒绝。
 - 不想装 Redis 的单机开发：`taskpilot.scheduler.election.enabled=false`，本实例直接充当 leader。
 
+### 5.5 集群验收脚本
+
+一条命令验证「集群里同一任务只触发一次」+ 故障转移：
+
+```powershell
+# 需要先执行 mvn -DskipTests package，并保证 MySQL 已建表、Redis 可用
+powershell -ExecutionPolicy Bypass -File scripts/verify-cluster.ps1
+
+# 想跑快一点：5 秒 cron、观察 20 秒
+powershell -ExecutionPolicy Bypass -File scripts/verify-cluster.ps1 -CronSeconds 5 -WaitSeconds 20
+```
+
+脚本会自己起 executor + 两个 scheduler、建一个 cron 任务、统计触发次数、强杀 leader、验证接管，结束后清理进程；日志在 `.tmp/verify-cluster/`。
+断言全部通过时退出码为 0，可直接接进 CI。
+
+参考耗时：10 秒 cron 观察 35 秒 → 触发 3 次（理论 3 次，双实例若都触发会翻倍）；强杀 leader 后 **26 秒**接管，fencing token 从 1 变 2。
+
 相关入口：
 
 - Swagger UI：<http://localhost:8080/swagger-ui.html>
 - OpenAPI JSON：<http://localhost:8080/v3/api-docs>
 - 演示页面：<http://localhost:8080/>（概览 / 任务 / 执行器 / 执行记录四个 Tab）
 
-### 5.5 确认建表
+### 5.6 确认建表
 
 ```bash
 docker exec -it taskpilot-mysql mysql -utaskpilot -ptaskpilot \
   -e "USE taskpilot; SHOW TABLES;"
 ```
+
+### 5.7 演示步骤（录屏用）
+
+1. 打开 <http://localhost:8080/>，概览页：任务数、在线执行器、当前 Leader 一览。
+2. 新建一个 `*/10 * * * * *` 的任务（处理器 `demoHandler`），观察任务列表的「下次触发」逐秒推进。
+3. 10 秒后切到「执行记录」Tab：出现 `triggerType=CRON` 的记录，状态成功。
+4. 点任务行的「触发」手动触发一次：toast 提示执行记录 ID 与耗时，执行记录里多一条 `MANUAL`。
+5. 跑 `scripts/verify-cluster.ps1`：展示"两个实例只触发一次 + 强杀 leader 后 26 秒接管"。
+6. 演示 fencing：把 `tp_leader.fencing_token` 改大，旧 leader 的触发被拒（日志出现 `fencing token 失效`）。
 
 ## 6. API 约定
 
@@ -240,10 +267,10 @@ docker exec -it taskpilot-mysql mysql -utaskpilot -ptaskpilot \
 **第 2 周**
 
 - [x] Day 1：自实现时间轮（1 秒粒度）+ cron 定时触发 + `next_trigger_time` 推进 + 重启重建
-- [ ] Day 2：错过触发的补偿策略、任务变更与时间轮联动
+- [x] Day 2：错过触发的补偿策略（`SKIP` / `FIRE_ONCE`）+ 任务变更与时间轮联动
 - [x] Day 3：领导选举（Redisson 锁 + fencing token）+ 双实例只触发一次
-- [ ] Day 4：调度状态持久化与重启补偿
-- [ ] Day 5：双 scheduler 实例验收（同一任务只触发一次）
+- [x] Day 4：调度状态可见（概览显示当前 leader）+ 任务变更跨实例同步（定期对账）
+- [x] Day 5：集群验收脚本（`scripts/verify-cluster.ps1`）+ 演示步骤
 
 ## 8. 文档索引
 
@@ -265,7 +292,18 @@ docker exec -it taskpilot-mysql mysql -utaskpilot -ptaskpilot \
 9. **多实例下定时任务不触发了？** 确认 Redis 可达（`redis-cli ping`），且 `tp_leader` 里有 leader 记录；日志里应出现 `became leader`。Redis 不可用时实例拿不到 leader 身份，会一直不触发（这是有意的失败关闭）。
 10. **leader 换了个实例后执行记录里的 leader 变了？** 正常。`tp_execution_log.leader_instance` / `fencing_token` 记录了每次触发由哪个 leader 产生。
 
-## 10. Roadmap
+## 10. 已知缺口
+
+| 缺口 | 影响 | 计划 |
+|---|---|---|
+| 执行器只注册一个 scheduler（`scheduler-base-url` 单地址） | scheduler 挂掉后执行器心跳断、变 OFFLINE，新 leader 触发只能记 FAILED | Week 3：执行器支持多注册中心 / 服务发现；执行器上下线与分片重分配 |
+| 定时触发是同步的（阻塞 Web 线程） | 长任务会占住请求线程 | Week 3：异步化 + 执行结果回调 |
+| 没有重试与退避 | 执行失败就是失败 | Week 3：重试/退避 + 死信 |
+| 没有分片 | 一个任务只在一个执行器上跑 | Week 3：shardIndex/shardTotal + 重平衡 |
+| 执行器接口无鉴权 | 仅限内网演示 | Week 4：简单 token |
+| 没有压测数据 | 简历里不能写吞吐/延迟数字 | Week 4：JMeter 实测 |
+
+## 11. Roadmap
 
 | 周 | 目标 |
 |---|---|
