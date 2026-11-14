@@ -18,6 +18,13 @@ public class ExecutorProperties {
 
     private String address = "127.0.0.1:8081";
 
+    /**
+     * 调度中心地址，支持逗号分隔多个：
+     * {@code scheduler-base-url: http://127.0.0.1:8080,http://127.0.0.1:8090}
+     * <p>多个地址是冗余保护：一个调度中心挂掉时，执行器仍能通过另一个地址心跳。</p>
+     * <p>这里刻意用 String 而不是 List：Spring Boot 的 @ConfigurationProperties
+     * 对 List 的绑定对逗号分隔字符串的处理并不直观，手动 split 更可控。</p>
+     */
     private String schedulerBaseUrl = "http://127.0.0.1:8080";
 
     private int heartbeatIntervalSeconds = 10;

@@ -17,6 +17,7 @@ taskpilot:
     app-name: taskpilot-executor
     group: DEFAULT
     address: ${TASKPILOT_EXECUTOR_ADDRESS:127.0.0.1:8081}
+    # 调度中心地址，支持逗号分隔多个（冗余保护：一个挂掉还能通过另一个心跳）
     scheduler-base-url: ${TASKPILOT_SCHEDULER_URL:http://127.0.0.1:8080}
     heartbeat-interval-seconds: 10
     connect-timeout-ms: 3000
