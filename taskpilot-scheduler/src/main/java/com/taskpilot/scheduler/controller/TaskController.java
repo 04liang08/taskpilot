@@ -6,7 +6,7 @@ import com.taskpilot.common.enums.TaskStatus;
 import com.taskpilot.scheduler.dto.TaskCreateRequest;
 import com.taskpilot.scheduler.dto.TaskQuery;
 import com.taskpilot.scheduler.dto.TaskUpdateRequest;
-import com.taskpilot.scheduler.entity.ExecutionLogEntity;
+import com.taskpilot.scheduler.dto.TriggerResult;
 import com.taskpilot.scheduler.entity.TaskEntity;
 import com.taskpilot.scheduler.service.TaskService;
 import com.taskpilot.scheduler.service.TriggerService;
@@ -80,9 +80,9 @@ public class TaskController {
         return ApiResponse.ok(taskService.changeStatus(id, TaskStatus.DISABLED));
     }
 
-    @Operation(summary = "手动触发任务，同步返回执行记录")
+    @Operation(summary = "手动触发任务，同步返回执行记录（分片任务返回多条）")
     @PostMapping("/{id}/trigger")
-    public ApiResponse<ExecutionLogEntity> trigger(@PathVariable Long id) {
+    public ApiResponse<TriggerResult> trigger(@PathVariable Long id) {
         return ApiResponse.ok(triggerService.trigger(id));
     }
 }

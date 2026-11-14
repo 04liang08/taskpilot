@@ -4,6 +4,7 @@ import lombok.Getter;
 import lombok.Setter;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import com.taskpilot.scheduler.schedule.MisfirePolicy;
+import com.taskpilot.scheduler.shard.ShardAllocationStrategy;
 
 /**
  * 调度中心自身的调度参数，对应 taskpilot.scheduler。
@@ -43,6 +44,11 @@ public class SchedulerProperties {
      * <p>任务事件只在进程内传播，别的实例创建的任务靠这个周期同步过来。</p>
      */
     private long taskSyncIntervalMs = 5000;
+
+    /**
+     * 分片分配策略：平均 / 哈希 / 广播。
+     */
+    private ShardAllocationStrategy shardAllocation = ShardAllocationStrategy.AVERAGE;
 
     private TriggerPool triggerPool = new TriggerPool();
 

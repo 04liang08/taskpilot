@@ -7,11 +7,13 @@ import com.taskpilot.common.enums.TriggerType;
 import com.taskpilot.common.exception.BizException;
 import com.taskpilot.common.exception.ErrorCode;
 import com.taskpilot.scheduler.client.ExecutorClient;
+import com.taskpilot.scheduler.dto.TriggerResult;
 import com.taskpilot.scheduler.entity.ExecutionLogEntity;
 import com.taskpilot.scheduler.entity.ExecutorEntity;
 import com.taskpilot.scheduler.entity.TaskEntity;
 import com.taskpilot.scheduler.leader.LeaderContext;
 import com.taskpilot.scheduler.leader.LeaderStateService;
+import com.taskpilot.scheduler.shard.ShardAllocatorRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -23,7 +25,9 @@ import org.springframework.web.client.RestClientException;
 
 import java.net.SocketTimeoutException;
 import java.net.http.HttpTimeoutException;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -42,6 +46,7 @@ public class TriggerService {
     private final ExecutionService executionService;
     private final ExecutorClient executorClient;
     private final LeaderStateService leaderStateService;
+    private final ShardAllocatorRegistry shardAllocatorRegistry;
     private final ThreadPoolTaskExecutor triggerExecutor;
     private final AtomicInteger roundRobin = new AtomicInteger();
     /**
@@ -55,12 +60,14 @@ public class TriggerService {
                           ExecutionService executionService,
                           ExecutorClient executorClient,
                           LeaderStateService leaderStateService,
+                          ShardAllocatorRegistry shardAllocatorRegistry,
                           @Qualifier("triggerExecutor") ThreadPoolTaskExecutor triggerExecutor) {
         this.taskService = taskService;
         this.executorService = executorService;
         this.executionService = executionService;
         this.executorClient = executorClient;
         this.leaderStateService = leaderStateService;
+        this.shardAllocatorRegistry = shardAllocatorRegistry;
         this.triggerExecutor = triggerExecutor;
     }
 
@@ -86,11 +93,11 @@ public class TriggerService {
         }
     }
 
-    public ExecutionLogEntity trigger(Long taskId) {
+    public TriggerResult trigger(Long taskId) {
         return doTrigger(taskId, TriggerType.MANUAL, LeaderContext.none());
     }
 
-    private ExecutionLogEntity doTrigger(Long taskId, TriggerType triggerType, LeaderContext leaderContext) {
+    private TriggerResult doTrigger(Long taskId, TriggerType triggerType, LeaderContext leaderContext) {
         if (!runningTasks.add(taskId)) {
             throw new BizException(ErrorCode.CONFLICT, "任务正在执行中，请稍后再试: " + taskId);
         }
@@ -101,7 +108,7 @@ public class TriggerService {
         }
     }
 
-    private ExecutionLogEntity executeTrigger(Long taskId, TriggerType triggerType, LeaderContext leaderContext) {
+    private TriggerResult executeTrigger(Long taskId, TriggerType triggerType, LeaderContext leaderContext) {
         TaskEntity task = taskService.get(taskId);
         if (task.getStatus() != TaskStatus.ENABLED) {
             throw new BizException(ErrorCode.BAD_REQUEST, "任务未启用，无法触发: " + taskId);
@@ -118,51 +125,81 @@ public class TriggerService {
             throw new BizException(ErrorCode.EXECUTOR_UNAVAILABLE,
                     "没有可用的在线执行器，执行记录 ID=" + failed.getId() + "（FAILED）");
         }
-
-        ExecutorEntity executor = onlineExecutors.get(
-                Math.floorMod(roundRobin.getAndIncrement(), onlineExecutors.size()));
-        ExecutionLogEntity execution = executionService.createRunning(task, executor, triggerType, leaderContext);
         taskService.markTriggered(taskId);
 
+        int shardTotal = task.getShardTotal() == null ? 1 : task.getShardTotal();
+        if (shardTotal <= 1) {
+            ExecutorEntity executor = onlineExecutors.get(
+                    Math.floorMod(roundRobin.getAndIncrement(), onlineExecutors.size()));
+            ExecutionLogEntity execution = executionService.createRunning(
+                    task, executor, triggerType, leaderContext, 0, 1);
+            ExecutionLogEntity finished = dispatch(execution, task, executor, triggerType);
+            return TriggerResult.of(List.of(finished));
+        }
+
+        // 分片任务：一次触发拆成 N 个分片，按策略分配到各个执行器。
+        Map<Integer, List<ExecutorEntity>> plan = shardAllocatorRegistry.current()
+                .allocate(taskId, shardTotal, onlineExecutors);
+        List<ExecutionLogEntity> results = new ArrayList<>();
+        for (Map.Entry<Integer, List<ExecutorEntity>> entry : plan.entrySet()) {
+            for (ExecutorEntity executor : entry.getValue()) {
+                ExecutionLogEntity execution = executionService.createRunning(
+                        task, executor, triggerType, leaderContext, entry.getKey(), shardTotal);
+                results.add(dispatch(execution, task, executor, triggerType));
+            }
+        }
+        if (results.isEmpty()) {
+            throw new BizException(ErrorCode.EXECUTOR_UNAVAILABLE,
+                    "分片没有分配到任何执行器，taskId=" + taskId);
+        }
+        log.info("sharded trigger finished: taskId={}, shardTotal={}, executions={}, strategy={}",
+                taskId, shardTotal, results.size(), shardAllocatorRegistry.strategy());
+        return TriggerResult.of(results);
+    }
+
+    /**
+     * 调用执行器并落终态。分片与单分片共用这条路径，失败只影响当前分片。
+     */
+    private ExecutionLogEntity dispatch(ExecutionLogEntity execution,
+                                        TaskEntity task,
+                                        ExecutorEntity executor,
+                                        TriggerType triggerType) {
         ExecuteRequest request = new ExecuteRequest(
                 execution.getId(),
                 task.getId(),
                 task.getHandlerName(),
                 task.getHandlerParam(),
-                0,
-                task.getShardTotal() == null ? 1 : task.getShardTotal(),
+                execution.getShardIndex(),
+                execution.getShardTotal(),
                 task.getTimeoutSeconds());
 
         try {
             ExecuteResult result = executorClient.execute(executor.getAddress(), request);
             ExecutionLogEntity finished = executionService.complete(execution, result);
-            log.info("{} finished: taskId={}, executionId={}, executor={}, status={}, durationMs={}",
+            log.info("{} finished: taskId={}, executionId={}, shard={}/{}, executor={}, status={}, durationMs={}",
                     triggerType == TriggerType.CRON ? "scheduled trigger" : "manual trigger",
-                    taskId, execution.getId(), executor.getAddress(),
-                    finished.getStatus(), finished.getDurationMs());
+                    task.getId(), execution.getId(), execution.getShardIndex(), execution.getShardTotal(),
+                    executor.getAddress(), finished.getStatus(), finished.getDurationMs());
             return finished;
         } catch (ResourceAccessException e) {
-            String message = "调用执行器失败: " + rootMessage(e);
             if (isTimeout(e)) {
                 ExecutionLogEntity finished = executionService.markTimeout(execution, "调用执行器超时: " + rootMessage(e));
-                log.warn("manual trigger timeout: taskId={}, executionId={}, executor={}, reason={}",
-                        taskId, execution.getId(), executor.getAddress(), rootMessage(e));
+                log.warn("trigger timeout: taskId={}, executionId={}, executor={}, reason={}",
+                        task.getId(), execution.getId(), executor.getAddress(), rootMessage(e));
                 return finished;
             }
-            ExecutionLogEntity finished = executionService.markFailed(execution, message);
-            log.warn("manual trigger failed: taskId={}, executionId={}, executor={}, reason={}",
-                    taskId, execution.getId(), executor.getAddress(), rootMessage(e));
+            ExecutionLogEntity finished = executionService.markFailed(execution, "调用执行器失败: " + rootMessage(e));
+            log.warn("trigger failed: taskId={}, executionId={}, executor={}, reason={}",
+                    task.getId(), execution.getId(), executor.getAddress(), rootMessage(e));
             return finished;
         } catch (RestClientException e) {
-            String message = "调用执行器失败: " + rootMessage(e);
-            ExecutionLogEntity finished = executionService.markFailed(execution, message);
-            log.warn("manual trigger failed: taskId={}, executionId={}, executor={}, reason={}",
-                    taskId, execution.getId(), executor.getAddress(), rootMessage(e));
+            ExecutionLogEntity finished = executionService.markFailed(execution, "调用执行器失败: " + rootMessage(e));
+            log.warn("trigger failed: taskId={}, executionId={}, executor={}, reason={}",
+                    task.getId(), execution.getId(), executor.getAddress(), rootMessage(e));
             return finished;
         } catch (Exception e) {
-            String message = "触发异常: " + rootMessage(e);
-            ExecutionLogEntity finished = executionService.markFailed(execution, message);
-            log.error("manual trigger error: taskId={}, executionId={}", taskId, execution.getId(), e);
+            ExecutionLogEntity finished = executionService.markFailed(execution, "触发异常: " + rootMessage(e));
+            log.error("trigger error: taskId={}, executionId={}", task.getId(), execution.getId(), e);
             return finished;
         }
     }

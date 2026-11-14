@@ -8,11 +8,14 @@ import com.taskpilot.common.enums.TriggerType;
 import com.taskpilot.common.exception.BizException;
 import com.taskpilot.common.exception.ErrorCode;
 import com.taskpilot.scheduler.client.ExecutorClient;
+import com.taskpilot.scheduler.dto.TriggerResult;
 import com.taskpilot.scheduler.entity.ExecutionLogEntity;
 import com.taskpilot.scheduler.entity.ExecutorEntity;
 import com.taskpilot.scheduler.entity.TaskEntity;
 import com.taskpilot.scheduler.leader.LeaderContext;
 import com.taskpilot.scheduler.leader.LeaderStateService;
+import com.taskpilot.scheduler.shard.ShardAllocator;
+import com.taskpilot.scheduler.shard.ShardAllocatorRegistry;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
@@ -23,18 +26,24 @@ import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.web.client.ResourceAccessException;
 
 import java.time.LocalDateTime;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -58,6 +67,12 @@ class TriggerServiceTest {
     private LeaderStateService leaderStateService;
 
     @Mock
+    private ShardAllocatorRegistry shardAllocatorRegistry;
+
+    @Mock
+    private ShardAllocator shardAllocator;
+
+    @Mock
     private ThreadPoolTaskExecutor triggerExecutor;
 
     @InjectMocks
@@ -73,15 +88,17 @@ class TriggerServiceTest {
         finished.setDurationMs(9L);
         when(taskService.get(1L)).thenReturn(task);
         when(executorService.listOnline()).thenReturn(List.of(executor));
-        when(executionService.createRunning(eq(task), eq(executor), eq(TriggerType.MANUAL), any()))
+        when(executionService.createRunning(eq(task), eq(executor), eq(TriggerType.MANUAL), any(), anyInt(), anyInt()))
                 .thenReturn(running);
         when(executorClient.execute(eq("127.0.0.1:8081"), any(ExecuteRequest.class)))
                 .thenReturn(ExecuteResult.success("ok", 9));
         when(executionService.complete(eq(running), any(ExecuteResult.class))).thenReturn(finished);
 
-        ExecutionLogEntity result = triggerService.trigger(1L);
+        TriggerResult result = triggerService.trigger(1L);
 
-        assertThat(result).isSameAs(finished);
+        assertThat(result.executionId()).isEqualTo(200L);
+        assertThat(result.status()).isEqualTo(ExecutionStatus.SUCCESS);
+        assertThat(result.executions()).containsExactly(finished);
         ArgumentCaptor<ExecuteRequest> requestCaptor = ArgumentCaptor.forClass(ExecuteRequest.class);
         verify(executorClient).execute(eq("127.0.0.1:8081"), requestCaptor.capture());
         assertThat(requestCaptor.getValue().executionId()).isEqualTo(200L);
@@ -131,15 +148,16 @@ class TriggerServiceTest {
         failed.setStatus(ExecutionStatus.FAILED);
         when(taskService.get(1L)).thenReturn(task);
         when(executorService.listOnline()).thenReturn(List.of(executor));
-        when(executionService.createRunning(eq(task), eq(executor), eq(TriggerType.MANUAL), any()))
+        when(executionService.createRunning(eq(task), eq(executor), eq(TriggerType.MANUAL), any(), anyInt(), anyInt()))
                 .thenReturn(running);
         when(executorClient.execute(eq("127.0.0.1:8081"), any(ExecuteRequest.class)))
                 .thenThrow(new ResourceAccessException("Connection refused"));
         when(executionService.markFailed(eq(running), anyString())).thenReturn(failed);
 
-        ExecutionLogEntity result = triggerService.trigger(1L);
+        TriggerResult result = triggerService.trigger(1L);
 
-        assertThat(result).isSameAs(failed);
+        assertThat(result.status()).isEqualTo(ExecutionStatus.FAILED);
+        assertThat(result.executions()).containsExactly(failed);
         verify(executionService).markFailed(eq(running), anyString());
         verify(executionService, never()).markTimeout(any(ExecutionLogEntity.class), anyString());
     }
@@ -153,7 +171,7 @@ class TriggerServiceTest {
         ExecutionLogEntity running = runningExecution(203L);
         when(taskService.get(1L)).thenReturn(task);
         when(executorService.listOnline()).thenReturn(List.of(executor));
-        when(executionService.createRunning(eq(task), eq(executor), eq(TriggerType.MANUAL), any()))
+        when(executionService.createRunning(eq(task), eq(executor), eq(TriggerType.MANUAL), any(), anyInt(), anyInt()))
                 .thenReturn(running);
         when(executorClient.execute(eq("127.0.0.1:8081"), any(ExecuteRequest.class)))
                 .thenAnswer(invocation -> {
@@ -178,6 +196,53 @@ class TriggerServiceTest {
             release.countDown();
             pool.shutdownNow();
         }
+    }
+
+    @Test
+    void shardedTaskCreatesOneExecutionPerShard() {
+        TaskEntity task = enabledTask();
+        task.setShardTotal(3);
+        ExecutorEntity first = onlineExecutor();
+        ExecutorEntity second = onlineExecutor();
+        second.setId(11L);
+        second.setAddress("127.0.0.1:8082");
+
+        Map<Integer, List<ExecutorEntity>> plan = new LinkedHashMap<>();
+        plan.put(0, List.of(first));
+        plan.put(1, List.of(second));
+        plan.put(2, List.of(first));
+
+        when(taskService.get(1L)).thenReturn(task);
+        when(executorService.listOnline()).thenReturn(List.of(first, second));
+        when(shardAllocatorRegistry.current()).thenReturn(shardAllocator);
+        when(shardAllocator.allocate(eq(1L), eq(3), anyList())).thenReturn(plan);
+
+        AtomicLong sequence = new AtomicLong(300L);
+        when(executionService.createRunning(eq(task), any(ExecutorEntity.class), eq(TriggerType.MANUAL),
+                any(), anyInt(), eq(3))).thenAnswer(invocation -> {
+            ExecutionLogEntity execution = runningExecution(sequence.incrementAndGet());
+            execution.setShardIndex(invocation.getArgument(4));
+            execution.setShardTotal(3);
+            return execution;
+        });
+        when(executorClient.execute(anyString(), any(ExecuteRequest.class)))
+                .thenReturn(ExecuteResult.success("ok", 5));
+        when(executionService.complete(any(ExecutionLogEntity.class), any(ExecuteResult.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        TriggerResult result = triggerService.trigger(1L);
+
+        assertThat(result.shardTotal()).isEqualTo(3);
+        assertThat(result.executions()).hasSize(3);
+        assertThat(result.executions()).extracting(ExecutionLogEntity::getShardIndex)
+                .containsExactly(0, 1, 2);
+        // 每个分片都带上了自己的 shardIndex，交给执行器做分片内处理。
+        ArgumentCaptor<ExecuteRequest> captor = ArgumentCaptor.forClass(ExecuteRequest.class);
+        verify(executorClient, times(3)).execute(anyString(), captor.capture());
+        assertThat(captor.getAllValues()).extracting(ExecuteRequest::shardIndex)
+                .containsExactly(0, 1, 2);
+        assertThat(captor.getAllValues()).extracting(ExecuteRequest::shardTotal)
+                .containsOnly(3);
     }
 
     private TaskEntity enabledTask() {

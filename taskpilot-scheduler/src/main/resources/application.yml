@@ -57,6 +57,8 @@ taskpilot:
     # 进程停机期间错过触发的补偿策略：SKIP 跳过 / FIRE_ONCE 补跑一次。
     misfire-policy: SKIP
     misfire-threshold-seconds: 300
+    # 分片分配策略：平均 / 哈希 / 广播。
+    shard-allocation: AVERAGE
     trigger-pool:
       core-size: 4
       max-size: 16

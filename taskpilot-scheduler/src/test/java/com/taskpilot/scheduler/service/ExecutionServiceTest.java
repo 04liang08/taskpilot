@@ -40,7 +40,7 @@ class ExecutionServiceTest {
         });
 
         ExecutionLogEntity execution = executionService.createRunning(task(), executor(), TriggerType.MANUAL,
-                LeaderContext.none());
+                LeaderContext.none(), 0, 1);
 
         assertThat(execution.getId()).isEqualTo(100L);
         assertThat(execution.getExecutionKey()).isNotBlank();

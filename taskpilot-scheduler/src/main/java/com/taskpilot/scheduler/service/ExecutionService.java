@@ -38,12 +38,14 @@ public class ExecutionService {
     }
 
     /**
-     * 手动触发先插入 RUNNING 记录。execution_key 使用 UUID，允许重复手动触发。
+     * 落 RUNNING 记录。execution_key 使用 UUID，允许重复手动触发。
      */
     public ExecutionLogEntity createRunning(TaskEntity task,
                                             ExecutorEntity executor,
                                             TriggerType triggerType,
-                                            LeaderContext leaderContext) {
+                                            LeaderContext leaderContext,
+                                            int shardIndex,
+                                            int shardTotal) {
         LocalDateTime now = LocalDateTime.now();
         ExecutionLogEntity entity = new ExecutionLogEntity();
         entity.setExecutionKey(UUID.randomUUID().toString());
@@ -54,8 +56,8 @@ public class ExecutionService {
         entity.setStartTime(now);
         entity.setExecutorId(executor == null ? null : executor.getId());
         entity.setExecutorAddress(executor == null ? null : executor.getAddress());
-        entity.setShardIndex(0);
-        entity.setShardTotal(task.getShardTotal() == null ? 1 : task.getShardTotal());
+        entity.setShardIndex(shardIndex);
+        entity.setShardTotal(shardTotal);
         entity.setStatus(ExecutionStatus.RUNNING);
         entity.setRetryCount(0);
         entity.setFencingToken(leaderContext.fencingToken());

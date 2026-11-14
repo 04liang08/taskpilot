@@ -32,6 +32,7 @@
 
 - 任务定义管理：CRUD、启停、cron 校验。
 - 触发：手动触发 + 自实现时间轮的 cron 定时触发；第 2 周后半段接入领导选举。
+- 分片：按策略把一次触发拆成 N 个分片，每个分片一条执行记录、独立调度。
 - 执行器注册表：注册 / 心跳 / 超时下线；第 3 周扩展为分片与失败转移依据。
 - 执行记录：先落 `RUNNING` 再调用执行器，最终更新为 `SUCCESS/FAILED/TIMEOUT`。
 - 管理端：REST API + `static/index.html` 极简演示页。
@@ -39,6 +40,7 @@
 ### executor
 
 - 启动时向 scheduler 注册自身地址；每 10 秒心跳。
+- 支持配置多个调度中心地址：逐个尝试，任意一个通即可，避免单调度中心故障导致执行器被判离线。
 - 接收 `POST /api/v1/executor/execute`，按 `handlerName` 从注册表找到处理器并执行。
 - 线程池隔离，结果同步返回（第 3 周再考虑异步与超时控制）。
 - 无状态，可水平扩展；地址必须能被调度中心访问。
@@ -73,7 +75,7 @@ POST /api/v1/tasks/{id}/trigger
 
 先落库再调用，保证超时或进程崩溃时仍有执行记录可追溯。
 
-### 3.4 领导选举（集群只触发一次）
+### 3.3 领导选举（集群只触发一次）
 
 ```text
 每个 scheduler 实例
@@ -90,7 +92,7 @@ POST /api/v1/tasks/{id}/trigger
 
 关键点：锁解决"同时只有一个 leader"，fencing token 解决"过期 leader 复活后继续写"。两者缺一不可。
 
-### 3.5 定时触发（时间轮）
+### 3.4 定时触发（时间轮）
 
 ```text
 scheduler 启动
@@ -111,7 +113,19 @@ scheduler 启动
 
 关键点：DB 是真相源，时间轮只是内存索引；进程重启后按 `next_trigger_time` 重建，天然具备重启补偿能力。
 
-> 只有 leader 推轮子（见 3.4）；follower 拿到 leader 身份时会重新按 DB 重建时间轮。
+> 只有 leader 推轮子（见 3.3）；follower 拿到 leader 身份时会重新按 DB 重建时间轮。
+
+### 3.5 分片触发（Week 3）
+
+```text
+一次触发（手动或定时）
+  → shardTotal = 任务配置的分片数
+  → 按策略分配：平均 / 哈希 / 广播（taskpilot.scheduler.shard-allocation）
+  → 每个分片落一条 tp_execution_log（shard_index / shard_total / executor_id）
+  → 每个分片独立调用对应执行器，互不影响
+```
+
+分片粒度的执行记录是失败转移的基础：知道"哪个分片在哪个执行器上"，执行器下线时才能精确重分配那几个分片。
 
 ## 4. 数据模型
 

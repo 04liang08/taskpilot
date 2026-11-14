@@ -228,11 +228,29 @@ docker exec -it taskpilot-mysql mysql -utaskpilot -ptaskpilot \
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| POST | `/api/v1/tasks/{id}/trigger` | 手动触发：校验启用状态、选择在线执行器、同步执行并返回执行记录 |
+| POST | `/api/v1/tasks/{id}/trigger` | 手动触发：校验启用状态、分配执行器（分片任务按策略拆片）、同步执行并返回执行记录 |
 | GET | `/api/v1/executions` | 分页查询：`page`、`size`、`taskId`、`status`、`startTime`、`endTime` |
 | GET | `/api/v1/executions/{id}` | 执行记录详情 |
 
+触发响应（分片任务会返回多条记录）：
+
+```json
+{
+  "code": 0,
+  "message": "ok",
+  "data": {
+    "executionId": 9,
+    "status": "SUCCESS",
+    "shardTotal": 4,
+    "durationMs": 5,
+    "executions": [{ "id": 9, "shardIndex": 0, "shardTotal": 4, "status": "SUCCESS" }]
+  }
+}
+```
+
 执行状态：`RUNNING`（已落库、调用中）、`SUCCESS`、`FAILED`、`TIMEOUT`、`CANCELED`（第 1 周未使用）。
+
+分片分配策略（`taskpilot.scheduler.shard-allocation`）：`AVERAGE`（默认，均分）、`HASH`（按 taskId+分片号稳定映射）、`BROADCAST`（每个分片发给所有执行器）。
 
 执行器注册表：
 
@@ -272,6 +290,14 @@ docker exec -it taskpilot-mysql mysql -utaskpilot -ptaskpilot \
 - [x] Day 4：调度状态可见（概览显示当前 leader）+ 任务变更跨实例同步（定期对账）
 - [x] Day 5：集群验收脚本（`scripts/verify-cluster.ps1`）+ 演示步骤
 
+**第 3 周**
+
+- [x] Day 1：执行器多注册中心（修掉单 scheduler 缺口）+ 分片分配策略（平均/哈希/广播）+ 分片触发链路
+- [ ] Day 2：分片并行执行 + 执行器上下线检测
+- [ ] Day 3：失败转移（执行器下线后分片重分配）
+- [ ] Day 4：重试/退避 + 幂等闭环
+- [ ] Day 5：端到端验收 + 文档
+
 ## 8. 文档索引
 
 - [架构说明](docs/architecture.md)
@@ -296,10 +322,11 @@ docker exec -it taskpilot-mysql mysql -utaskpilot -ptaskpilot \
 
 | 缺口 | 影响 | 计划 |
 |---|---|---|
-| 执行器只注册一个 scheduler（`scheduler-base-url` 单地址） | scheduler 挂掉后执行器心跳断、变 OFFLINE，新 leader 触发只能记 FAILED | Week 3：执行器支持多注册中心 / 服务发现；执行器上下线与分片重分配 |
+| 分片串行执行 | 分片数多时整体耗时长 | Week 3：分片并行 |
+| 执行器只注册一个 scheduler（`scheduler-base-url` 单地址） | ~~scheduler 挂掉后执行器心跳断、变 OFFLINE~~ **已修复**：支持逗号分隔多地址 | Week 3：可继续支持服务发现 |
 | 定时触发是同步的（阻塞 Web 线程） | 长任务会占住请求线程 | Week 3：异步化 + 执行结果回调 |
 | 没有重试与退避 | 执行失败就是失败 | Week 3：重试/退避 + 死信 |
-| 没有分片 | 一个任务只在一个执行器上跑 | Week 3：shardIndex/shardTotal + 重平衡 |
+| 执行器下线后分片不重分配 | 下线执行器上的分片不会自动转移 | Week 3：分片重平衡 |
 | 执行器接口无鉴权 | 仅限内网演示 | Week 4：简单 token |
 | 没有压测数据 | 简历里不能写吞吐/延迟数字 | Week 4：JMeter 实测 |
 

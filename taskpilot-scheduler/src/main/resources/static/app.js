@@ -261,7 +261,7 @@ async function loadExecutions() {
     $('#btn-execution-next').disabled = data.page >= pages;
   } catch (error) {
     $('#execution-tbody').innerHTML =
-      `<tr><td colspan="8" class="empty">${escapeHtml(error.message)}</td></tr>`;
+      `<tr><td colspan="9" class="empty">${escapeHtml(error.message)}</td></tr>`;
   }
 }
 
@@ -292,6 +292,7 @@ function renderExecutions(executions) {
       ? `<span class="error-text" title="${escapeHtml(execution.errorMessage)}">${escapeHtml(truncateText(execution.errorMessage, 90))}</span>`
       : escapeHtml(truncateText(execution.resultSummary || '-', 90));
     const duration = execution.durationMs == null ? '-' : `${execution.durationMs} ms`;
+    const shard = execution.shardTotal > 1 ? `${execution.shardIndex}/${execution.shardTotal}` : '-';
     return `
       <tr>
         <td>${execution.id}</td>
@@ -301,6 +302,7 @@ function renderExecutions(executions) {
         </td>
         <td>${escapeHtml(TRIGGER_TYPE[execution.triggerType] || execution.triggerType || '-')}</td>
         <td><span class="badge ${status.className}">${escapeHtml(status.label)}</span></td>
+        <td>${shard}</td>
         <td><code>${escapeHtml(execution.executorAddress || '-')}</code></td>
         <td>${escapeHtml(formatDateTime(execution.triggerTime))}</td>
         <td>${duration}</td>
@@ -465,11 +467,12 @@ async function handleTaskAction(event) {
   if (button.dataset.action === 'trigger') {
     button.disabled = true;
     try {
-      const execution = await api(`/tasks/${id}/trigger`, { method: 'POST' });
-      const status = EXECUTION_STATUS[execution.status] || { label: execution.status };
-      const duration = execution.durationMs == null ? '-' : `${execution.durationMs} ms`;
-      toast(`执行记录 #${execution.id}：${status.label}（${duration}）`,
-        execution.status === 'SUCCESS' ? 'success' : 'error');
+      const result = await api(`/tasks/${id}/trigger`, { method: 'POST' });
+      const status = EXECUTION_STATUS[result.status] || { label: result.status };
+      const duration = result.durationMs == null ? '-' : `${result.durationMs} ms`;
+      const shard = result.shardTotal > 1 ? ` · ${result.shardTotal} 分片` : '';
+      toast(`执行记录 #${result.executionId}：${status.label}（${duration}）${shard}`,
+        result.status === 'SUCCESS' ? 'success' : 'error');
       loadOverview();
       refreshExecutionsSoon();
     } catch (error) {
