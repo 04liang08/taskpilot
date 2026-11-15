@@ -250,6 +250,15 @@ public class TriggerScheduler {
         if (!leaderElectionService.isLeader()) {
             return;
         }
+        // pollDue 已经把这个条目从轮子里取走了。如果此刻轮子里又出现了这个任务，
+        // 说明期间它被重排过（改 cron / 与 DB 对账），不能再按旧 cron 推进，
+        // 否则会把新排期覆盖掉，旧节奏也就跟着回来了。
+        Long rescheduled = wheel.scheduledTimeOf(taskId);
+        if (rescheduled != null) {
+            log.info("skip advancing, task was rescheduled concurrently: taskId={}, newTime={}",
+                    taskId, rescheduled);
+            return;
+        }
         ScheduledTask scheduled = cache.get(taskId);
         if (scheduled == null) {
             // 任务已停用或删除，不再触发。
