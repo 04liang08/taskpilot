@@ -29,6 +29,8 @@ import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.web.client.ResourceAccessException;
 
 import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -45,6 +47,7 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -53,6 +56,9 @@ import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
 class TriggerServiceTest {
+
+    /** 固定的"计划触发时间"，用来验证确定性幂等键的格式。 */
+    private static final LocalDateTime SCHEDULED_TIME = LocalDateTime.of(2026, 1, 1, 10, 0, 0);
 
     @Mock
     private TaskService taskService;
@@ -310,6 +316,113 @@ class TriggerServiceTest {
         assertThat(result.status()).isEqualTo(ExecutionStatus.SUCCESS);
     }
 
+    @Test
+    void broadcastShardCreatesOneExecutionPerExecutor() {
+        // 广播：每个分片都投给所有执行器，幂等键必须带上执行器维度，
+        // 否则第二台起就撞唯一索引被当成重复触发跳过，广播实际只剩一台在跑。
+        TaskEntity task = enabledTask();
+        task.setShardTotal(2);
+        ExecutorEntity first = onlineExecutor();
+        ExecutorEntity second = onlineExecutor();
+        second.setId(11L);
+        second.setAddress("127.0.0.1:8082");
+
+        Map<Integer, List<ExecutorEntity>> plan = new LinkedHashMap<>();
+        plan.put(0, List.of(first, second));
+        plan.put(1, List.of(first, second));
+
+        List<String> keys = Collections.synchronizedList(new ArrayList<>());
+        when(taskService.get(1L)).thenReturn(task);
+        when(executorService.listOnline()).thenReturn(List.of(first, second));
+        when(shardAllocatorRegistry.current()).thenReturn(shardAllocator);
+        when(shardAllocator.allocate(eq(1L), eq(2), anyList())).thenReturn(plan);
+        when(executionService.createRunning(eq(task), any(ExecutorEntity.class), eq(TriggerType.CRON),
+                any(), anyInt(), eq(2), anyString())).thenAnswer(invocation -> {
+            keys.add(invocation.getArgument(6));
+            ExecutionLogEntity execution = runningExecution(500L + keys.size());
+            execution.setShardIndex(invocation.getArgument(4));
+            execution.setShardTotal(2);
+            return new CreatedExecution(execution, true);
+        });
+        when(executorClient.execute(anyString(), any(ExecuteRequest.class)))
+                .thenReturn(ExecuteResult.success("ok", 5));
+        when(executionService.complete(any(ExecutionLogEntity.class), any(ExecuteResult.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        runTriggerInline();
+
+        triggerService.triggerAsync(1L, LeaderContext.none(), SCHEDULED_TIME);
+
+        // 2 个分片 × 2 台执行器 = 4 条记录、4 次调用，4 个互不相同的幂等键。
+        assertThat(keys).hasSize(4).doesNotHaveDuplicates();
+        verify(executorClient, times(4)).execute(anyString(), any(ExecuteRequest.class));
+        assertThat(keys).allMatch(key -> key.startsWith("1:20260101100000:"));
+        assertThat(keys).allMatch(key -> key.split(":").length == 4);
+    }
+
+    @Test
+    void singleTargetShardKeepsKeyWithoutExecutorDimension() {
+        // 单目标分片的键保持不变，不能因为广播的修复把普通分片的去重语义改掉。
+        TaskEntity task = enabledTask();
+        task.setShardTotal(2);
+        ExecutorEntity first = onlineExecutor();
+        ExecutorEntity second = onlineExecutor();
+        second.setId(11L);
+        second.setAddress("127.0.0.1:8082");
+
+        Map<Integer, List<ExecutorEntity>> plan = new LinkedHashMap<>();
+        plan.put(0, List.of(first));
+        plan.put(1, List.of(second));
+
+        List<String> keys = Collections.synchronizedList(new ArrayList<>());
+        when(taskService.get(1L)).thenReturn(task);
+        when(executorService.listOnline()).thenReturn(List.of(first, second));
+        when(shardAllocatorRegistry.current()).thenReturn(shardAllocator);
+        when(shardAllocator.allocate(eq(1L), eq(2), anyList())).thenReturn(plan);
+        when(executionService.createRunning(eq(task), any(ExecutorEntity.class), eq(TriggerType.CRON),
+                any(), anyInt(), eq(2), anyString())).thenAnswer(invocation -> {
+            keys.add(invocation.getArgument(6));
+            ExecutionLogEntity execution = runningExecution(600L + keys.size());
+            execution.setShardIndex(invocation.getArgument(4));
+            execution.setShardTotal(2);
+            return new CreatedExecution(execution, true);
+        });
+        when(executorClient.execute(anyString(), any(ExecuteRequest.class)))
+                .thenReturn(ExecuteResult.success("ok", 5));
+        when(executionService.complete(any(ExecutionLogEntity.class), any(ExecuteResult.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        runTriggerInline();
+
+        triggerService.triggerAsync(1L, LeaderContext.none(), SCHEDULED_TIME);
+
+        assertThat(keys).containsExactlyInAnyOrder("1:20260101100000:0", "1:20260101100000:1");
+    }
+
+    @Test
+    void duplicateScheduledTriggerIsSkippedByIdempotencyKey() {
+        // 同一个计划时间点重复触发：幂等键撞唯一索引，created=false，不再执行一遍。
+        TaskEntity task = enabledTask();
+        ExecutionLogEntity existing = runningExecution(700L);
+        when(taskService.get(1L)).thenReturn(task);
+        when(executorService.listOnline()).thenReturn(List.of(onlineExecutor()));
+        when(executionService.createRunning(eq(task), any(ExecutorEntity.class), eq(TriggerType.CRON),
+                any(), anyInt(), anyInt(), anyString())).thenReturn(new CreatedExecution(existing, false));
+        runTriggerInline();
+
+        triggerService.triggerAsync(1L, LeaderContext.none(), SCHEDULED_TIME);
+
+        verify(executorClient, never()).execute(anyString(), any(ExecuteRequest.class));
+    }
+
+    /**
+     * 让被 mock 的触发线程池直接同步执行，方便断言定时触发的结果。
+     */
+    private void runTriggerInline() {
+        doAnswer(invocation -> {
+            ((Runnable) invocation.getArgument(0)).run();
+            return null;
+        }).when(triggerExecutor).execute(any(Runnable.class));
+    }
+
     private TaskEntity enabledTask() {
         TaskEntity task = new TaskEntity();
         task.setId(1L);
@@ -321,7 +434,6 @@ class TriggerServiceTest {
         task.setStatus(TaskStatus.ENABLED);
         return task;
     }
-
     private ExecutorEntity onlineExecutor() {
         ExecutorEntity executor = new ExecutorEntity();
         executor.setId(10L);

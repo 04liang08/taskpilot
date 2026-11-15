@@ -153,7 +153,7 @@ public class TriggerService {
             ExecutorEntity executor = onlineExecutors.get(
                     Math.floorMod(roundRobin.getAndIncrement(), onlineExecutors.size()));
             List<ExecutionLogEntity> results = executeShards(
-                    List.of(new ShardJob(task, executor, 0, 1, executionKey(taskId, scheduledTime, 0))),
+                    List.of(new ShardJob(task, executor, 0, 1, executionKey(taskId, scheduledTime, 0, executor, 1))),
                     task, triggerType, leaderContext);
             return TriggerResult.of(results);
         }
@@ -163,9 +163,10 @@ public class TriggerService {
                 .allocate(taskId, shardTotal, onlineExecutors);
         List<ShardJob> jobs = new ArrayList<>();
         for (Map.Entry<Integer, List<ExecutorEntity>> entry : plan.entrySet()) {
-            for (ExecutorEntity executor : entry.getValue()) {
+            List<ExecutorEntity> targets = entry.getValue();
+            for (ExecutorEntity executor : targets) {
                 jobs.add(new ShardJob(task, executor, entry.getKey(), shardTotal,
-                        executionKey(taskId, scheduledTime, entry.getKey())));
+                        executionKey(taskId, scheduledTime, entry.getKey(), executor, targets.size())));
             }
         }
         if (jobs.isEmpty()) {
@@ -181,10 +182,20 @@ public class TriggerService {
     /**
      * 幂等键：定时触发用确定性键（同一计划时间点只会落一条记录），
      * 手动触发用 UUID（允许重复触发）。
+     * <p>一个分片有多个目标执行器时（广播策略）键要带上执行器维度：
+     * 否则第二台执行器会撞唯一索引被当成"重复触发"跳过，广播实际只剩一台在跑。</p>
+     * <p>单目标分片的键保持不变，不影响已有的去重语义。</p>
      */
-    private String executionKey(Long taskId, LocalDateTime scheduledTime, int shardIndex) {
+    private String executionKey(Long taskId,
+                                LocalDateTime scheduledTime,
+                                int shardIndex,
+                                ExecutorEntity executor,
+                                int targetCount) {
         if (scheduledTime == null) {
             return UUID.randomUUID().toString();
+        }
+        if (targetCount > 1 && executor != null && executor.getId() != null) {
+            return ExecutionKeys.deterministic(taskId, scheduledTime, shardIndex, executor.getId());
         }
         return ExecutionKeys.deterministic(taskId, scheduledTime, shardIndex);
     }
