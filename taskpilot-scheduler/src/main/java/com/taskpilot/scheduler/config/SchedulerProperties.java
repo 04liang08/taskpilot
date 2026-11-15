@@ -52,6 +52,23 @@ public class SchedulerProperties {
 
     private TriggerPool triggerPool = new TriggerPool();
 
+    private ShardPool shardPool = new ShardPool();
+
+    @Getter
+    @Setter
+    public static class ShardPool {
+
+        /**
+         * 分片执行线程池。独立于触发线程池：分片任务会等待分片执行结果，
+         * 如果共用一个池，触发线程全在等待时会把自己饿死在同一个池里。
+         */
+        private int coreSize = 8;
+
+        private int maxSize = 32;
+
+        private int queueCapacity = 1024;
+    }
+
     private Election election = new Election();
 
     @Getter

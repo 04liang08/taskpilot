@@ -29,6 +29,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -48,6 +49,7 @@ public class TriggerService {
     private final LeaderStateService leaderStateService;
     private final ShardAllocatorRegistry shardAllocatorRegistry;
     private final ThreadPoolTaskExecutor triggerExecutor;
+    private final ThreadPoolTaskExecutor shardExecutor;
     private final AtomicInteger roundRobin = new AtomicInteger();
     /**
      * 同一任务不允许并发执行。手动触发与定时触发共用这把锁。
@@ -61,7 +63,8 @@ public class TriggerService {
                           ExecutorClient executorClient,
                           LeaderStateService leaderStateService,
                           ShardAllocatorRegistry shardAllocatorRegistry,
-                          @Qualifier("triggerExecutor") ThreadPoolTaskExecutor triggerExecutor) {
+                          @Qualifier("triggerExecutor") ThreadPoolTaskExecutor triggerExecutor,
+                          @Qualifier("shardExecutor") ThreadPoolTaskExecutor shardExecutor) {
         this.taskService = taskService;
         this.executorService = executorService;
         this.executionService = executionService;
@@ -69,6 +72,7 @@ public class TriggerService {
         this.leaderStateService = leaderStateService;
         this.shardAllocatorRegistry = shardAllocatorRegistry;
         this.triggerExecutor = triggerExecutor;
+        this.shardExecutor = shardExecutor;
     }
 
     /**
@@ -133,28 +137,69 @@ public class TriggerService {
                     Math.floorMod(roundRobin.getAndIncrement(), onlineExecutors.size()));
             ExecutionLogEntity execution = executionService.createRunning(
                     task, executor, triggerType, leaderContext, 0, 1);
-            ExecutionLogEntity finished = dispatch(execution, task, executor, triggerType);
-            return TriggerResult.of(List.of(finished));
+            List<ExecutionLogEntity> results = executeShards(
+                    List.of(new ShardJob(execution, executor)), task, triggerType);
+            return TriggerResult.of(results);
         }
 
         // 分片任务：一次触发拆成 N 个分片，按策略分配到各个执行器。
         Map<Integer, List<ExecutorEntity>> plan = shardAllocatorRegistry.current()
                 .allocate(taskId, shardTotal, onlineExecutors);
-        List<ExecutionLogEntity> results = new ArrayList<>();
+        List<ShardJob> jobs = new ArrayList<>();
         for (Map.Entry<Integer, List<ExecutorEntity>> entry : plan.entrySet()) {
             for (ExecutorEntity executor : entry.getValue()) {
                 ExecutionLogEntity execution = executionService.createRunning(
                         task, executor, triggerType, leaderContext, entry.getKey(), shardTotal);
-                results.add(dispatch(execution, task, executor, triggerType));
+                jobs.add(new ShardJob(execution, executor));
             }
         }
-        if (results.isEmpty()) {
+        if (jobs.isEmpty()) {
             throw new BizException(ErrorCode.EXECUTOR_UNAVAILABLE,
                     "分片没有分配到任何执行器，taskId=" + taskId);
         }
+        List<ExecutionLogEntity> results = executeShards(jobs, task, triggerType);
         log.info("sharded trigger finished: taskId={}, shardTotal={}, executions={}, strategy={}",
                 taskId, shardTotal, results.size(), shardAllocatorRegistry.strategy());
         return TriggerResult.of(results);
+    }
+
+    /**
+     * 并发执行分片：全部落库后一起跑，互不阻塞。
+     * <p>用独立的分片线程池：分片之间要并发，且触发线程会等待分片结果，
+     * 和触发线程池共用一个池容易把自己饿死。</p>
+     */
+    private List<ExecutionLogEntity> executeShards(List<ShardJob> jobs,
+                                                   TaskEntity task,
+                                                   TriggerType triggerType) {
+        List<CompletableFuture<ExecutionLogEntity>> futures = new ArrayList<>();
+        for (ShardJob job : jobs) {
+            futures.add(submitShard(job, task, triggerType));
+        }
+        CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
+        List<ExecutionLogEntity> results = new ArrayList<>();
+        for (CompletableFuture<ExecutionLogEntity> future : futures) {
+            results.add(future.join());
+        }
+        return results;
+    }
+
+    private CompletableFuture<ExecutionLogEntity> submitShard(ShardJob job,
+                                                              TaskEntity task,
+                                                              TriggerType triggerType) {
+        try {
+            return CompletableFuture.supplyAsync(
+                    () -> dispatch(job.execution(), task, job.executor(), triggerType), shardExecutor);
+        } catch (TaskRejectedException e) {
+            // 分片池满了：这个分片直接失败，不影响其他分片。
+            return CompletableFuture.completedFuture(
+                    executionService.markFailed(job.execution(), "分片执行线程池已满"));
+        }
+    }
+
+    /**
+     * 一个分片：执行记录 + 目标执行器。
+     */
+    private record ShardJob(ExecutionLogEntity execution, ExecutorEntity executor) {
     }
 
     /**

@@ -11,7 +11,9 @@ import com.taskpilot.scheduler.dto.ExecutorHeartbeatRequest;
 import com.taskpilot.scheduler.dto.ExecutorQuery;
 import com.taskpilot.scheduler.dto.ExecutorRegisterRequest;
 import com.taskpilot.scheduler.entity.ExecutorEntity;
+import com.taskpilot.scheduler.executor.ExecutorStatusChangedEvent;
 import com.taskpilot.scheduler.mapper.ExecutorMapper;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
@@ -29,9 +31,11 @@ public class ExecutorService {
     private static final String DEFAULT_GROUP = "DEFAULT";
 
     private final ExecutorMapper executorMapper;
+    private final ApplicationEventPublisher eventPublisher;
 
-    public ExecutorService(ExecutorMapper executorMapper) {
+    public ExecutorService(ExecutorMapper executorMapper, ApplicationEventPublisher eventPublisher) {
         this.executorMapper = executorMapper;
+        this.eventPublisher = eventPublisher;
     }
 
     /**
@@ -46,11 +50,16 @@ public class ExecutorService {
 
         ExecutorEntity existing = findByAddress(appName, address);
         if (existing != null) {
+            boolean wasOffline = existing.getStatus() == ExecutorStatus.OFFLINE;
             existing.setExecutorGroup(group);
             existing.setStatus(ExecutorStatus.ONLINE);
             existing.setLastHeartbeatTime(now);
             executorMapper.updateById(existing);
-            return get(existing.getId());
+            ExecutorEntity updated = get(existing.getId());
+            if (wasOffline) {
+                publishStatusChanged(updated, true);
+            }
+            return updated;
         }
 
         ExecutorEntity entity = new ExecutorEntity();
@@ -61,7 +70,9 @@ public class ExecutorService {
         entity.setLastHeartbeatTime(now);
         try {
             executorMapper.insert(entity);
-            return get(entity.getId());
+            ExecutorEntity created = get(entity.getId());
+            publishStatusChanged(created, true);
+            return created;
         } catch (DuplicateKeyException e) {
             // 并发注册撞唯一键：退化为心跳更新，保证接口幂等。
             ExecutorHeartbeatRequest heartbeat = new ExecutorHeartbeatRequest();
@@ -87,11 +98,17 @@ public class ExecutorService {
         }
 
         LocalDateTime now = LocalDateTime.now();
+        boolean wasOffline = existing.getStatus() == ExecutorStatus.OFFLINE;
         executorMapper.update(null, Wrappers.<ExecutorEntity>lambdaUpdate()
                 .eq(ExecutorEntity::getId, existing.getId())
                 .set(ExecutorEntity::getStatus, ExecutorStatus.ONLINE)
                 .set(ExecutorEntity::getLastHeartbeatTime, now));
-        return get(existing.getId());
+        ExecutorEntity updated = get(existing.getId());
+        if (wasOffline) {
+            // 从离线恢复：下线期间分派到它上面的分片需要重新分配（Week 3 Day 3）。
+            publishStatusChanged(updated, true);
+        }
+        return updated;
     }
 
     public ExecutorEntity get(Long id) {
@@ -127,16 +144,32 @@ public class ExecutorService {
     }
 
     /**
-     * 将最后心跳早于 deadline 的在线执行器标记为 OFFLINE。
+     * 将最后心跳早于 deadline 的在线执行器标记为 OFFLINE，并发布下线事件。
      *
      * @return 本次下线的执行器数量
      */
     public int markStaleOffline(long timeoutSeconds) {
         LocalDateTime deadline = LocalDateTime.now().minusSeconds(timeoutSeconds);
-        return executorMapper.update(null, Wrappers.<ExecutorEntity>lambdaUpdate()
+        // 先查出会下线的执行器：一条 UPDATE 拿不到具体是哪几个，事件需要具体信息。
+        List<ExecutorEntity> stale = executorMapper.selectList(Wrappers.<ExecutorEntity>lambdaQuery()
+                .eq(ExecutorEntity::getStatus, ExecutorStatus.ONLINE)
+                .lt(ExecutorEntity::getLastHeartbeatTime, deadline));
+        if (stale.isEmpty()) {
+            return 0;
+        }
+        int updated = executorMapper.update(null, Wrappers.<ExecutorEntity>lambdaUpdate()
                 .eq(ExecutorEntity::getStatus, ExecutorStatus.ONLINE)
                 .lt(ExecutorEntity::getLastHeartbeatTime, deadline)
                 .set(ExecutorEntity::getStatus, ExecutorStatus.OFFLINE));
+        for (ExecutorEntity executor : stale) {
+            publishStatusChanged(executor, false);
+        }
+        return updated;
+    }
+
+    private void publishStatusChanged(ExecutorEntity executor, boolean online) {
+        eventPublisher.publishEvent(
+                new ExecutorStatusChangedEvent(executor.getId(), executor.getAddress(), online));
     }
 
     private ExecutorEntity findByAddress(String appName, String address) {

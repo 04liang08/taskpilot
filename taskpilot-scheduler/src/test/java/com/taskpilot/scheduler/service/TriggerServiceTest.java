@@ -16,10 +16,11 @@ import com.taskpilot.scheduler.leader.LeaderContext;
 import com.taskpilot.scheduler.leader.LeaderStateService;
 import com.taskpilot.scheduler.shard.ShardAllocator;
 import com.taskpilot.scheduler.shard.ShardAllocatorRegistry;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
-import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
@@ -75,8 +76,25 @@ class TriggerServiceTest {
     @Mock
     private ThreadPoolTaskExecutor triggerExecutor;
 
-    @InjectMocks
+    private ThreadPoolTaskExecutor shardExecutor;
     private TriggerService triggerService;
+
+    @BeforeEach
+    void setUp() {
+        // 分片执行用的是真实线程池：CompletableFuture 依赖 executor 真正把任务跑起来。
+        shardExecutor = new ThreadPoolTaskExecutor();
+        shardExecutor.setCorePoolSize(4);
+        shardExecutor.setMaxPoolSize(8);
+        shardExecutor.setQueueCapacity(64);
+        shardExecutor.initialize();
+        triggerService = new TriggerService(taskService, executorService, executionService, executorClient,
+                leaderStateService, shardAllocatorRegistry, triggerExecutor, shardExecutor);
+    }
+
+    @AfterEach
+    void tearDown() {
+        shardExecutor.shutdown();
+    }
 
     @Test
     void triggerSelectsOnlineExecutorAndCompletesExecution() {
@@ -236,13 +254,54 @@ class TriggerServiceTest {
         assertThat(result.executions()).hasSize(3);
         assertThat(result.executions()).extracting(ExecutionLogEntity::getShardIndex)
                 .containsExactly(0, 1, 2);
-        // 每个分片都带上了自己的 shardIndex，交给执行器做分片内处理。
+        // 分片是并发执行的，调用顺序不固定，按集合断言。
         ArgumentCaptor<ExecuteRequest> captor = ArgumentCaptor.forClass(ExecuteRequest.class);
         verify(executorClient, times(3)).execute(anyString(), captor.capture());
         assertThat(captor.getAllValues()).extracting(ExecuteRequest::shardIndex)
-                .containsExactly(0, 1, 2);
+                .containsExactlyInAnyOrder(0, 1, 2);
         assertThat(captor.getAllValues()).extracting(ExecuteRequest::shardTotal)
                 .containsOnly(3);
+    }
+
+    @Test
+    void shardsRunInParallel() throws Exception {
+        // 两个分片都要等对方进入：串行执行会互相卡死，只有并发才能一起通过。
+        CountDownLatch entered = new CountDownLatch(2);
+        TaskEntity task = enabledTask();
+        task.setShardTotal(2);
+        ExecutorEntity first = onlineExecutor();
+        ExecutorEntity second = onlineExecutor();
+        second.setId(11L);
+        second.setAddress("127.0.0.1:8082");
+
+        Map<Integer, List<ExecutorEntity>> plan = new LinkedHashMap<>();
+        plan.put(0, List.of(first));
+        plan.put(1, List.of(second));
+
+        when(taskService.get(1L)).thenReturn(task);
+        when(executorService.listOnline()).thenReturn(List.of(first, second));
+        when(shardAllocatorRegistry.current()).thenReturn(shardAllocator);
+        when(shardAllocator.allocate(eq(1L), eq(2), anyList())).thenReturn(plan);
+        when(executionService.createRunning(eq(task), any(ExecutorEntity.class), eq(TriggerType.MANUAL),
+                any(), anyInt(), eq(2))).thenAnswer(invocation -> {
+            int shardIndex = invocation.getArgument(4);
+            ExecutionLogEntity execution = runningExecution(400L + shardIndex);
+            execution.setShardIndex(shardIndex);
+            execution.setShardTotal(2);
+            return execution;
+        });
+        when(executorClient.execute(anyString(), any(ExecuteRequest.class))).thenAnswer(invocation -> {
+            entered.countDown();
+            assertThat(entered.await(5, TimeUnit.SECONDS)).isTrue();
+            return ExecuteResult.success("ok", 1);
+        });
+        when(executionService.complete(any(ExecutionLogEntity.class), any(ExecuteResult.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        TriggerResult result = triggerService.trigger(1L);
+
+        assertThat(result.executions()).hasSize(2);
+        assertThat(result.status()).isEqualTo(ExecutionStatus.SUCCESS);
     }
 
     private TaskEntity enabledTask() {

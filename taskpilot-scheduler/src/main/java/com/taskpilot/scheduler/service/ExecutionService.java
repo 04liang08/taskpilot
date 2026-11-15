@@ -127,6 +127,22 @@ public class ExecutionService {
         return entity;
     }
 
+    /**
+     * 执行器下线时，把它身上还处于 RUNNING 的执行记录标记为 FAILED。
+     * <p>执行器没了，这些执行不可能再有结果；不收尾的话概览的"运行中"会一直挂着。</p>
+     *
+     * @return 受影响的记录数
+     */
+    public int failRunningOfExecutor(Long executorId, String reason) {
+        LocalDateTime now = LocalDateTime.now();
+        return executionLogMapper.update(null, Wrappers.<ExecutionLogEntity>lambdaUpdate()
+                .eq(ExecutionLogEntity::getExecutorId, executorId)
+                .eq(ExecutionLogEntity::getStatus, ExecutionStatus.RUNNING)
+                .set(ExecutionLogEntity::getStatus, ExecutionStatus.FAILED)
+                .set(ExecutionLogEntity::getEndTime, now)
+                .set(ExecutionLogEntity::getErrorMessage, reason));
+    }
+
     public PageResult<ExecutionLogEntity> page(ExecutionQuery query) {
         Page<ExecutionLogEntity> page = new Page<>(query.getPage(), query.getSize());
         LambdaQueryWrapper<ExecutionLogEntity> wrapper = Wrappers.<ExecutionLogEntity>lambdaQuery()

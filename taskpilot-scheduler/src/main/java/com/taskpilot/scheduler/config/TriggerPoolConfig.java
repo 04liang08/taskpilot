@@ -31,4 +31,22 @@ public class TriggerPoolConfig {
         executor.initialize();
         return executor;
     }
+
+    /**
+     * 分片执行线程池。分片之间并发执行，池独立于触发线程池，避免互相等待。
+     */
+    @Bean(name = "shardExecutor")
+    public ThreadPoolTaskExecutor shardExecutor(SchedulerProperties properties) {
+        SchedulerProperties.ShardPool pool = properties.getShardPool();
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(pool.getCoreSize());
+        executor.setMaxPoolSize(pool.getMaxSize());
+        executor.setQueueCapacity(pool.getQueueCapacity());
+        executor.setThreadNamePrefix("taskpilot-shard-");
+        executor.setRejectedExecutionHandler(new ThreadPoolExecutor.AbortPolicy());
+        executor.setWaitForTasksToCompleteOnShutdown(true);
+        executor.setAwaitTerminationSeconds(20);
+        executor.initialize();
+        return executor;
+    }
 }

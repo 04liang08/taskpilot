@@ -252,6 +252,8 @@ docker exec -it taskpilot-mysql mysql -utaskpilot -ptaskpilot \
 
 分片分配策略（`taskpilot.scheduler.shard-allocation`）：`AVERAGE`（默认，均分）、`HASH`（按 taskId+分片号稳定映射）、`BROADCAST`（每个分片发给所有执行器）。
 
+分片之间**并发执行**（独立线程池），实测 4 个分片各执行 1 秒：串行约 4000 ms，并发约 **1290 ms**。分片之间的成败互不影响，汇总状态取"任一分片失败即失败"。
+
 执行器注册表：
 
 | 方法 | 路径 | 说明 |
@@ -293,7 +295,7 @@ docker exec -it taskpilot-mysql mysql -utaskpilot -ptaskpilot \
 **第 3 周**
 
 - [x] Day 1：执行器多注册中心（修掉单 scheduler 缺口）+ 分片分配策略（平均/哈希/广播）+ 分片触发链路
-- [ ] Day 2：分片并行执行 + 执行器上下线检测
+- [x] Day 2：分片并发执行（独立分片线程池）+ 执行器上下线事件 + 僵尸 RUNNING 记录回收
 - [ ] Day 3：失败转移（执行器下线后分片重分配）
 - [ ] Day 4：重试/退避 + 幂等闭环
 - [ ] Day 5：端到端验收 + 文档
@@ -322,11 +324,11 @@ docker exec -it taskpilot-mysql mysql -utaskpilot -ptaskpilot \
 
 | 缺口 | 影响 | 计划 |
 |---|---|---|
-| 分片串行执行 | 分片数多时整体耗时长 | Week 3：分片并行 |
-| 执行器只注册一个 scheduler（`scheduler-base-url` 单地址） | ~~scheduler 挂掉后执行器心跳断、变 OFFLINE~~ **已修复**：支持逗号分隔多地址 | Week 3：可继续支持服务发现 |
+| ~~分片串行执行~~ | **已修复**：分片并发执行（4 分片各 1 秒：串行 4000ms → 并发 1290ms） | — |
+| 执行器下线后分片不重分配 | 下线执行器上的分片不会自动转移到别的执行器 | Week 3 Day 3：分片重平衡 |
 | 定时触发是同步的（阻塞 Web 线程） | 长任务会占住请求线程 | Week 3：异步化 + 执行结果回调 |
-| 没有重试与退避 | 执行失败就是失败 | Week 3：重试/退避 + 死信 |
-| 执行器下线后分片不重分配 | 下线执行器上的分片不会自动转移 | Week 3：分片重平衡 |
+| 没有重试与退避 | 执行失败就是失败 | Week 3 Day 4：重试/退避 + 死信 |
+| 没有幂等闭环 | 定时触发的 `execution_key` 还是 UUID，没有去重 | Week 3 Day 4：确定性键 + 唯一索引 |
 | 执行器接口无鉴权 | 仅限内网演示 | Week 4：简单 token |
 | 没有压测数据 | 简历里不能写吞吐/延迟数字 | Week 4：JMeter 实测 |
 

@@ -3,6 +3,7 @@ package com.taskpilot.scheduler.service;
 import com.taskpilot.common.enums.ExecutorStatus;
 import com.taskpilot.scheduler.dto.ExecutorRegisterRequest;
 import com.taskpilot.scheduler.entity.ExecutorEntity;
+import com.taskpilot.scheduler.executor.ExecutorStatusChangedEvent;
 import com.taskpilot.scheduler.mapper.ExecutorMapper;
 import com.baomidou.mybatisplus.core.MybatisConfiguration;
 import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
@@ -14,8 +15,10 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.context.ApplicationEventPublisher;
 
 import java.time.LocalDateTime;
+import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
@@ -28,6 +31,9 @@ class ExecutorServiceTest {
 
     @Mock
     private ExecutorMapper executorMapper;
+
+    @Mock
+    private ApplicationEventPublisher eventPublisher;
 
     @InjectMocks
     private ExecutorService executorService;
@@ -87,11 +93,15 @@ class ExecutorServiceTest {
 
     @Test
     void markStaleOfflineReturnsUpdatedRows() {
+        ExecutorEntity stale = onlineExecutor(3L);
+        when(executorMapper.selectList(any())).thenReturn(List.of(stale));
         when(executorMapper.update(isNull(), any())).thenReturn(3);
 
         int count = executorService.markStaleOffline(30);
 
         assertThat(count).isEqualTo(3);
+        // 下线要发事件：Day 3 的分片重分配靠它触发。
+        verify(eventPublisher).publishEvent(any(ExecutorStatusChangedEvent.class));
     }
 
     private ExecutorEntity onlineExecutor(Long id) {

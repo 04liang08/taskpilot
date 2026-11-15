@@ -48,6 +48,10 @@ management:
       show-details: always
 
 taskpilot:
+  execution:
+    # 僵尸 RUNNING 记录回收：任务超时时间 + 宽限 秒
+    stale-grace-seconds: 60
+    recovery-interval-seconds: 60
   scheduler:
     # 时间轮：槽位数按秒对齐，一个槽位代表一轮里的同一秒。
     wheel-size: 60
