@@ -83,7 +83,8 @@ taskpilot:
       lock-key: taskpilot:scheduler:leader
       token-key: taskpilot:scheduler:fence:token
       retry-interval-ms: 2000
-      lease-seconds: 30
+      # 不配固定租约：tryLock() 走 Redisson watchdog 自动续期。
+      # 传 leaseTime 会关掉续期，活着的 leader 也会在租约到期后丢锁。
   executor:
     heartbeat-timeout-seconds: 30
     health-check-interval-seconds: 10

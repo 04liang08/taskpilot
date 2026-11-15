@@ -176,6 +176,19 @@ class ShardFailoverServiceTest {
     }
 
     @Test
+    void failoverSkipsManualTriggerRecords() {
+        // 手动触发失败就是失败：下线事件的批量转移不能把 MANUAL 记录也自动重试一遍。
+        ExecutionLogEntity execution = failedExecution(1L, 10L);
+        execution.setTriggerType(TriggerType.MANUAL);
+        when(taskService.get(1L)).thenReturn(task());
+
+        service.failover(execution);
+
+        verify(executionService, never()).claimForRetry(any(), any());
+        verify(triggerService, never()).dispatch(any(), any(), any(), any());
+    }
+
+    @Test
     void failoverRetriesRecordFinalizedByTheOfflineListener() {
         // 完整链路：执行器下线 → 收尾把 RUNNING 变成 FAILED 并挂上 next_retry_time
         // → 转移用原子 claim 抢到它 → 换机重跑。有预算的 RUNNING 记录必须被重试。

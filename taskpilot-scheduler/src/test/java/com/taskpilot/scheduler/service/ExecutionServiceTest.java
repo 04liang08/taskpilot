@@ -151,13 +151,27 @@ class ExecutionServiceTest {
             return 1;
         });
 
-        ExecutionLogEntity execution = executionService.createFailed(task(), "没有可用的在线执行器", LeaderContext.none());
+        ExecutionLogEntity execution = executionService.createFailed(
+                task(), "没有可用的在线执行器", LeaderContext.none(), TriggerType.MANUAL);
 
         verify(executionLogMapper).insert(captor.capture());
         assertThat(captor.getValue().getStatus()).isEqualTo(ExecutionStatus.FAILED);
+        assertThat(captor.getValue().getTriggerType()).isEqualTo(TriggerType.MANUAL);
         assertThat(captor.getValue().getErrorMessage()).isEqualTo("没有可用的在线执行器");
         assertThat(captor.getValue().getExecutorId()).isNull();
         assertThat(execution.getId()).isEqualTo(105L);
+    }
+
+    @Test
+    void createFailedRecordsTheRealCronTriggerType() {
+        when(executionLogMapper.insert(any(ExecutionLogEntity.class))).thenReturn(1);
+
+        executionService.createFailed(
+                task(), "没有可用的在线执行器", LeaderContext.none(), TriggerType.CRON);
+
+        ArgumentCaptor<ExecutionLogEntity> captor = ArgumentCaptor.forClass(ExecutionLogEntity.class);
+        verify(executionLogMapper).insert(captor.capture());
+        assertThat(captor.getValue().getTriggerType()).isEqualTo(TriggerType.CRON);
     }
 
     @Test

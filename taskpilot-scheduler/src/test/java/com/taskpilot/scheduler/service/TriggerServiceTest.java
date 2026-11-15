@@ -156,7 +156,8 @@ class TriggerServiceTest {
         failed.setStatus(ExecutionStatus.FAILED);
         when(taskService.get(1L)).thenReturn(task);
         when(executorService.listOnline()).thenReturn(List.of());
-        when(executionService.createFailed(eq(task), anyString(), any())).thenReturn(failed);
+        when(executionService.createFailed(eq(task), anyString(), any(), eq(TriggerType.MANUAL)))
+                .thenReturn(failed);
 
         assertThatThrownBy(() -> triggerService.trigger(1L))
                 .isInstanceOf(BizException.class)
@@ -164,7 +165,27 @@ class TriggerServiceTest {
                         .isEqualTo(ErrorCode.EXECUTOR_UNAVAILABLE.getCode()))
                 .hasMessageContaining("执行记录 ID=201");
 
-        verify(executionService).createFailed(eq(task), eq("没有可用的在线执行器"), any());
+        verify(executionService).createFailed(eq(task), eq("没有可用的在线执行器"), any(),
+                eq(TriggerType.MANUAL));
+        verify(executorClient, never()).execute(anyString(), any(ExecuteRequest.class));
+    }
+
+    @Test
+    void scheduledTriggerWithoutOnlineExecutorRecordsCronFailure() {
+        // cron 触发时没有在线执行器：FAILED 记录必须标 CRON，不能被误记成 MANUAL。
+        TaskEntity task = enabledTask();
+        ExecutionLogEntity failed = runningExecution(205L);
+        failed.setStatus(ExecutionStatus.FAILED);
+        when(taskService.get(1L)).thenReturn(task);
+        when(executorService.listOnline()).thenReturn(List.of());
+        when(executionService.createFailed(eq(task), anyString(), any(), eq(TriggerType.CRON)))
+                .thenReturn(failed);
+        runTriggerInline();
+
+        triggerService.triggerAsync(1L, LeaderContext.none(), SCHEDULED_TIME);
+
+        verify(executionService).createFailed(eq(task), eq("没有可用的在线执行器"), any(),
+                eq(TriggerType.CRON));
         verify(executorClient, never()).execute(anyString(), any(ExecuteRequest.class));
     }
 

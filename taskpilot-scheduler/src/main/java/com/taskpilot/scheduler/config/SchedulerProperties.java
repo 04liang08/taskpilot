@@ -104,10 +104,7 @@ public class SchedulerProperties {
          * 竞选间隔（毫秒）。
          */
         private long retryIntervalMs = 2000;
-
-        /**
-         * 锁租约（秒）。Redisson watchdog 会自动续期，这里只是兜底上限。
-         */
-        private long leaseSeconds = 30;
+        // 锁不设固定租约：campaign() 用 tryLock() 交给 Redisson watchdog 自动续期。
+        // 传 leaseTime 会关掉续期，活着的 leader 也会在租约到期后丢锁。
     }
 }

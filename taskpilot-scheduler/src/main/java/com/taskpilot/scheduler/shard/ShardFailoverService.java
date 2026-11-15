@@ -2,6 +2,7 @@ package com.taskpilot.scheduler.shard;
 
 import com.taskpilot.common.enums.ExecutionStatus;
 import com.taskpilot.common.enums.TaskStatus;
+import com.taskpilot.common.enums.TriggerType;
 import com.taskpilot.common.exception.BizException;
 import com.taskpilot.scheduler.entity.ExecutionLogEntity;
 import com.taskpilot.scheduler.entity.ExecutorEntity;
@@ -128,6 +129,12 @@ public class ShardFailoverService {
                 // 交给退避扫描兜底。绝不能让它停在 RUNNING——那样它再也不会被处理。
                 executionService.markRunningForRetry(execution.getId(), "执行器下线: 等待重试");
                 log.warn("shard failover deferred, record still running: executionId={}", execution.getId());
+                return;
+            }
+            if (execution.getTriggerType() == TriggerType.MANUAL) {
+                // 手动触发失败就是失败，由用户决定要不要重来。
+                // 执行器下线的批量转移不能把 MANUAL 记录也自动重试一遍。
+                log.info("shard failover skipped, manual trigger: executionId={}", execution.getId());
                 return;
             }
             if (execution.getExecutorId() != null && isOnline(execution.getExecutorId())) {

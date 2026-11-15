@@ -11,6 +11,10 @@ import org.redisson.api.RLock;
 import org.redisson.api.RedissonClient;
 import org.springframework.context.ApplicationEventPublisher;
 
+import java.lang.reflect.Field;
+import java.util.Arrays;
+import java.util.concurrent.TimeUnit;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
@@ -149,6 +153,24 @@ class LeaderElectionServiceTest {
 
         verify(lock).unlock();
         verify(lock, never()).forceUnlock();
+    }
+
+    @Test
+    void electionUsesWatchdogWithoutFixedLease() throws Exception {
+        // 死配置 lease-seconds 已删：抢锁必须走无参 tryLock()，让 watchdog 自动续期。
+        // 改成 tryLock(leaseTime) 会关掉续期，活着的 leader 也会在租约到期后丢锁。
+        becomeLeader();
+
+        verify(lock).tryLock();
+        verify(lock, never()).tryLock(anyLong(), any(TimeUnit.class));
+    }
+
+    @Test
+    void electionConfigDoesNotExposeUnusedLeaseSeconds() {
+        assertThat(Arrays.stream(SchedulerProperties.Election.class.getDeclaredFields())
+                .map(Field::getName)
+                .toList())
+                .doesNotContain("leaseSeconds");
     }
 
     private void becomeLeader() {

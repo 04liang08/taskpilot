@@ -95,14 +95,17 @@ public class ExecutionService {
 
     /**
      * 调度前就失败（例如没有在线执行器），也保留一条 FAILED 记录，便于页面追溯。
+     * <p>triggerType 必须用本次真实的触发方式：cron 任务没有在线执行器时
+     * 记成 MANUAL 会让执行历史失真，也会被"只重试 CRON"的规则误判。</p>
      */
-    public ExecutionLogEntity createFailed(TaskEntity task, String errorMessage, LeaderContext leaderContext) {
+    public ExecutionLogEntity createFailed(TaskEntity task, String errorMessage,
+                                           LeaderContext leaderContext, TriggerType triggerType) {
         LocalDateTime now = LocalDateTime.now();
         ExecutionLogEntity entity = new ExecutionLogEntity();
         entity.setExecutionKey(UUID.randomUUID().toString());
         entity.setTaskId(task.getId());
         entity.setTaskName(task.getTaskName());
-        entity.setTriggerType(TriggerType.MANUAL);
+        entity.setTriggerType(triggerType);
         entity.setTriggerTime(now);
         entity.setStartTime(now);
         entity.setEndTime(now);

@@ -142,7 +142,8 @@ public class TriggerService {
 
         List<ExecutorEntity> onlineExecutors = executorService.listOnline();
         if (onlineExecutors.isEmpty()) {
-            ExecutionLogEntity failed = executionService.createFailed(task, "没有可用的在线执行器", leaderContext);
+            ExecutionLogEntity failed = executionService.createFailed(
+                    task, "没有可用的在线执行器", leaderContext, triggerType);
             throw new BizException(ErrorCode.EXECUTOR_UNAVAILABLE,
                     "没有可用的在线执行器，执行记录 ID=" + failed.getId() + "（FAILED）");
         }
