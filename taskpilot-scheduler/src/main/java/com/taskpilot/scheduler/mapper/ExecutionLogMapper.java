@@ -44,4 +44,28 @@ public interface ExecutionLogMapper extends BaseMapper<ExecutionLogEntity> {
                AND status IN ('FAILED', 'TIMEOUT')
             """)
     int claimForRetry(@Param("id") Long id);
+
+    /**
+     * 失败转移专用：抢占重试的同时把记录改指向目标执行器。
+     * <p>转移成功后 {@code dispatch()} 复用这条记录落终态；如果 executor 列还指着
+     * 已经下线/故障的旧执行器，执行历史就会失真（页面看到的是"在 A 上跑成功"，
+     * 实际跑在 B 上）。和 claim 放在同一条 UPDATE 里，避免中间态被别的事件读到。</p>
+     * <p>SET / WHERE 与 {@link #claimForRetry(Long)} 保持一致，改一处要同步另一处。</p>
+     */
+    @Update("""
+            UPDATE tp_execution_log
+               SET status = 'RUNNING',
+                   retry_count = retry_count + 1,
+                   start_time = NOW(3),
+                   end_time = NULL,
+                   error_message = NULL,
+                   next_retry_time = NULL,
+                   executor_id = #{executorId},
+                   executor_address = #{executorAddress}
+             WHERE id = #{id}
+               AND status IN ('FAILED', 'TIMEOUT')
+            """)
+    int claimForRetryOn(@Param("id") Long id,
+                        @Param("executorId") Long executorId,
+                        @Param("executorAddress") String executorAddress);
 }

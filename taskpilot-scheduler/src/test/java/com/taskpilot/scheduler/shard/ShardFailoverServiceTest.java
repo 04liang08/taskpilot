@@ -13,6 +13,7 @@ import com.taskpilot.scheduler.service.TriggerService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
@@ -22,6 +23,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -77,11 +79,11 @@ class ShardFailoverServiceTest {
         when(executionService.canRetry(execution, task)).thenReturn(true);
         when(shardAllocatorRegistry.current()).thenReturn(shardAllocator);
         when(shardAllocator.allocate(eq(1L), eq(2), anyList())).thenReturn(plan);
-        when(executionService.claimForRetry(execution)).thenReturn(true);
+        when(executionService.claimForRetry(execution, target)).thenReturn(true);
 
         service.failover(execution);
 
-        verify(executionService).claimForRetry(execution);
+        verify(executionService).claimForRetry(execution, target);
         verify(triggerService).dispatch(eq(execution), eq(task), eq(target), eq(TriggerType.CRON));
     }
 
@@ -96,7 +98,7 @@ class ShardFailoverServiceTest {
         service.failover(execution);
 
         // 执行器还活着：失败多半是任务本身的问题，不该转移。
-        verify(executionService, never()).claimForRetry(any());
+        verify(executionService, never()).claimForRetry(any(), any());
         verify(triggerService, never()).dispatch(any(), any(), any(), any());
     }
 
@@ -113,7 +115,7 @@ class ShardFailoverServiceTest {
         when(executionService.canRetry(execution, task)).thenReturn(true);
         when(shardAllocatorRegistry.current()).thenReturn(shardAllocator);
         when(shardAllocator.allocate(eq(1L), eq(2), anyList())).thenReturn(plan);
-        when(executionService.claimForRetry(execution)).thenReturn(false);
+        when(executionService.claimForRetry(execution, target)).thenReturn(false);
 
         service.failover(execution);
 
@@ -143,8 +145,34 @@ class ShardFailoverServiceTest {
         service.failover(execution);
 
         verify(executionService).markRunningForRetry(eq(100L), anyString());
-        verify(executionService, never()).claimForRetry(any());
+        verify(executionService, never()).claimForRetry(any(), any());
         verify(triggerService, never()).dispatch(any(), any(), any(), any());
+    }
+
+    @Test
+    void failoverRebindsTheRecordToTheTargetExecutorBeforeDispatch() {
+        // 转移用的 claim 和 dispatch 必须指向同一台目标执行器，
+        // 否则记录仍写着已下线的旧执行器，执行历史失真。
+        ExecutionLogEntity execution = failedExecution(1L, 10L);
+        TaskEntity task = task();
+        ExecutorEntity target = executor(11L, "127.0.0.1:8082");
+        Map<Integer, List<ExecutorEntity>> plan = new LinkedHashMap<>();
+        plan.put(0, List.of(target));
+
+        when(taskService.get(1L)).thenReturn(task);
+        when(executionService.canRetry(execution, task)).thenReturn(true);
+        when(executorService.listOnline()).thenReturn(List.of(target));
+        when(shardAllocatorRegistry.current()).thenReturn(shardAllocator);
+        when(shardAllocator.allocate(eq(1L), eq(2), anyList())).thenReturn(plan);
+        when(executionService.claimForRetry(execution, target)).thenReturn(true);
+
+        service.failover(execution);
+
+        ArgumentCaptor<ExecutorEntity> claimCaptor = ArgumentCaptor.forClass(ExecutorEntity.class);
+        verify(executionService).claimForRetry(eq(execution), claimCaptor.capture());
+        verify(triggerService).dispatch(eq(execution), eq(task), eq(target), eq(TriggerType.CRON));
+        assertThat(claimCaptor.getValue().getId()).isEqualTo(target.getId());
+        assertThat(claimCaptor.getValue().getAddress()).isEqualTo(target.getAddress());
     }
 
     @Test
@@ -163,11 +191,11 @@ class ShardFailoverServiceTest {
         when(executorService.listOnline()).thenReturn(List.of(target));
         when(shardAllocatorRegistry.current()).thenReturn(shardAllocator);
         when(shardAllocator.allocate(eq(1L), eq(2), anyList())).thenReturn(plan);
-        when(executionService.claimForRetry(execution)).thenReturn(true);
+        when(executionService.claimForRetry(execution, target)).thenReturn(true);
 
         service.failover(execution);
 
-        verify(executionService).claimForRetry(execution);
+        verify(executionService).claimForRetry(execution, target);
         verify(triggerService).dispatch(eq(execution), eq(task), eq(target), eq(TriggerType.CRON));
     }
 
@@ -184,7 +212,7 @@ class ShardFailoverServiceTest {
         service.failover(execution);
 
         verify(executionService).markRetryExhausted(execution);
-        verify(executionService, never()).claimForRetry(any());
+        verify(executionService, never()).claimForRetry(any(), any());
         verify(triggerService, never()).dispatch(any(), any(), any(), any());
     }
 

@@ -30,7 +30,9 @@ import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -231,6 +233,39 @@ class ExecutionServiceTest {
         assertThat(captor.getValue().getParamNameValuePairs().values()).contains(TriggerType.CRON);
     }
 
+    @Test
+    void claimForRetryOnFailoverRebindsPersistedExecutor() {
+        // 失败转移：抢占重试的同一条 UPDATE 把记录改指向目标执行器，
+        // 转移成功后落终态不会再写回那台已经挂掉的旧执行器。
+        ExecutionLogEntity execution = failedExecution(109L);
+        ExecutorEntity target = new ExecutorEntity();
+        target.setId(11L);
+        target.setAddress("127.0.0.1:8082");
+        when(executionLogMapper.claimForRetryOn(109L, 11L, "127.0.0.1:8082")).thenReturn(1);
+
+        assertThat(executionService.claimForRetry(execution, target)).isTrue();
+
+        verify(executionLogMapper).claimForRetryOn(109L, 11L, "127.0.0.1:8082");
+        assertThat(execution.getExecutorId()).isEqualTo(11L);
+        assertThat(execution.getExecutorAddress()).isEqualTo("127.0.0.1:8082");
+        assertThat(execution.getStatus()).isEqualTo(ExecutionStatus.RUNNING);
+        assertThat(execution.getRetryCount()).isEqualTo(1);
+    }
+
+    @Test
+    void claimForRetryOnOriginalExecutorLeavesExecutorColumnsUntouched() {
+        // 原地退避重试没有换机，executor 列必须保持原样。
+        ExecutionLogEntity execution = failedExecution(110L);
+        when(executionLogMapper.claimForRetry(110L)).thenReturn(1);
+
+        assertThat(executionService.claimForRetry(execution)).isTrue();
+
+        verify(executionLogMapper).claimForRetry(110L);
+        verify(executionLogMapper, never()).claimForRetryOn(anyLong(), any(), any());
+        assertThat(execution.getExecutorId()).isEqualTo(10L);
+        assertThat(execution.getExecutorAddress()).isEqualTo("127.0.0.1:8081");
+    }
+
     @SuppressWarnings("unchecked")
     private LambdaUpdateWrapper<ExecutionLogEntity> captureUpdate() {
         ArgumentCaptor<Wrapper<ExecutionLogEntity>> captor = ArgumentCaptor.forClass(Wrapper.class);
@@ -259,6 +294,16 @@ class ExecutionServiceTest {
         executor.setId(10L);
         executor.setAddress("127.0.0.1:8081");
         return executor;
+    }
+
+    private ExecutionLogEntity failedExecution(Long id) {
+        ExecutionLogEntity execution = runningExecution(id);
+        execution.setStatus(ExecutionStatus.FAILED);
+        execution.setRetryCount(0);
+        execution.setExecutorId(10L);
+        execution.setExecutorAddress("127.0.0.1:8081");
+        execution.setNextRetryTime(LocalDateTime.now().minusSeconds(1));
+        return execution;
     }
 
     private ExecutionLogEntity runningExecution(Long id) {

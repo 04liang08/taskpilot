@@ -207,14 +207,37 @@ public class ExecutionService {
         if (updated == 0) {
             return false;
         }
-        // 同步内存状态：后面的 updateById 会把整个实体写回去，不能用旧值覆盖 retry_count。
+        syncClaimedState(execution);
+        return true;
+    }
+
+    /**
+     * 失败转移抢占重试：在把记录改成 RUNNING 的同一条 UPDATE 里，把 executor 列
+     * 一并改指向目标执行器。
+     * <p>转移后 {@code dispatch()} 会复用这个实体落终态，如果 executor 字段还是旧的，
+     * 执行记录会永久指向那台已经挂掉的执行器，历史失真。内存实体也要同步，
+     * 否则后续任何整实体写回都可能把旧值覆盖回去。</p>
+     */
+    public boolean claimForRetry(ExecutionLogEntity execution, ExecutorEntity target) {
+        int updated = executionLogMapper.claimForRetryOn(
+                execution.getId(), target.getId(), target.getAddress());
+        if (updated == 0) {
+            return false;
+        }
+        syncClaimedState(execution);
+        execution.setExecutorId(target.getId());
+        execution.setExecutorAddress(target.getAddress());
+        return true;
+    }
+
+    private void syncClaimedState(ExecutionLogEntity execution) {
+        // 同步内存状态：后面的 dispatch / finish 会读这个实体，不能用旧值覆盖 retry_count。
         execution.setStatus(ExecutionStatus.RUNNING);
         execution.setRetryCount(execution.getRetryCount() == null ? 1 : execution.getRetryCount() + 1);
         execution.setStartTime(LocalDateTime.now());
         execution.setEndTime(null);
         execution.setErrorMessage(null);
         execution.setNextRetryTime(null);
-        return true;
     }
 
     /**

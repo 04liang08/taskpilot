@@ -160,14 +160,15 @@ public class ShardFailoverService {
                 return;
             }
             ExecutorEntity target = targets.get(0);
-            if (!executionService.claimForRetry(execution)) {
+            String previousAddress = execution.getExecutorAddress();
+            if (!executionService.claimForRetry(execution, target)) {
                 // 别的实例已经抢到这次重试。
                 log.info("shard failover skipped, already claimed: executionId={}", execution.getId());
                 return;
             }
             log.warn("shard failover: executionId={}, taskId={}, shard={}/{}, {} -> {}, retryCount={}",
                     execution.getId(), task.getId(), execution.getShardIndex(), execution.getShardTotal(),
-                    execution.getExecutorAddress(), target.getAddress(), execution.getRetryCount());
+                    previousAddress, target.getAddress(), execution.getRetryCount());
             triggerService.dispatch(execution, task, target, execution.getTriggerType());
         } catch (BizException e) {
             log.warn("shard failover aborted: executionId={}, message={}", execution.getId(), e.getMessage());
