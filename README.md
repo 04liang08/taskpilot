@@ -332,6 +332,7 @@ docker exec -it taskpilot-mysql mysql -utaskpilot -ptaskpilot \
 
 - [架构说明](docs/architecture.md)
 - [技术决策记录](docs/design-decisions.md)
+- [Backlog / Week 4 起点](docs/backlog.md)
 - [第 1 周开工方案（含完整 DDL / API / 每日任务）](docs/TaskPilot-第1周开工方案.md)
 - [项目总计划](docs/项目.md)
 
@@ -379,3 +380,5 @@ docker exec -it taskpilot-mysql mysql -utaskpilot -ptaskpilot \
 | 3 | 分片 + 失败转移 + 重试/退避 + 幂等 + 死信 |
 | 4 | MQ 结果/告警 + 压测 + CI |
 | 5 | 文档、架构图、演示录屏、面试复盘 |
+
+> Week 3 已收尾。评审遗留项（不阻塞合并）与 Week 4 起点见 [Backlog](docs/backlog.md)。
