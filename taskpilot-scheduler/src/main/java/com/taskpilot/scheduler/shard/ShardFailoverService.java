@@ -1,5 +1,6 @@
 package com.taskpilot.scheduler.shard;
 
+import com.taskpilot.common.enums.ExecutionStatus;
 import com.taskpilot.common.enums.TaskStatus;
 import com.taskpilot.common.exception.BizException;
 import com.taskpilot.scheduler.entity.ExecutionLogEntity;
@@ -14,6 +15,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.context.event.EventListener;
+import org.springframework.core.Ordered;
+import org.springframework.core.annotation.Order;
 import org.springframework.core.task.TaskRejectedException;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.stereotype.Component;
@@ -80,8 +83,11 @@ public class ShardFailoverService {
 
     /**
      * 执行器下线：把它身上所有没结束的分片转移到其他在线执行器。
+     * <p>顺序在 {@code ExecutorStatusListener} 之后：先收尾（RUNNING → FAILED），
+     * 这里才能用一条 UPDATE 把它原子抢过来重试。</p>
      */
     @EventListener
+    @Order(Ordered.LOWEST_PRECEDENCE)
     public void onExecutorStatusChanged(ExecutorStatusChangedEvent event) {
         if (event.online()) {
             return;
@@ -112,6 +118,16 @@ public class ShardFailoverService {
         try {
             TaskEntity task = taskService.get(execution.getTaskId());
             if (task == null || task.getStatus() != TaskStatus.ENABLED) {
+                // 任务没了/停用了：没有重试的可能，落终态，别让兜底扫描反复捞回来。
+                executionService.markRetryExhausted(execution);
+                return;
+            }
+            if (execution.getStatus() == ExecutionStatus.RUNNING) {
+                // 收尾（ExecutorStatusListener）应该已经先把它变成 FAILED 了。
+                // 万一顺序没生效，这里抢不动 RUNNING 的记录：手动收尾并挂上重试时间，
+                // 交给退避扫描兜底。绝不能让它停在 RUNNING——那样它再也不会被处理。
+                executionService.markRunningForRetry(execution.getId(), "执行器下线: 等待重试");
+                log.warn("shard failover deferred, record still running: executionId={}", execution.getId());
                 return;
             }
             if (execution.getExecutorId() != null && isOnline(execution.getExecutorId())) {
@@ -121,9 +137,11 @@ public class ShardFailoverService {
                 return;
             }
             if (!executionService.canRetry(execution, task)) {
-                // 重试预算用完：这条记录就是终态（死信），不再换机重试。
+                // 重试预算用完：清掉 next_retry_time，这条记录当场落终态（死信），
+                // 不再换机重试，也不会被兜底扫描反复捞回来。
                 log.warn("shard failover skipped, no retry budget left: executionId={}, retryCount={}, maxRetry={}",
                         execution.getId(), execution.getRetryCount(), task.getRetryMax());
+                executionService.markRetryExhausted(execution);
                 return;
             }
             List<ExecutorEntity> candidates = executorService.listOnline().stream()

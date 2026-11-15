@@ -34,6 +34,12 @@ public class ExecutionService {
     private static final int RESULT_SUMMARY_MAX_LENGTH = 1024;
     private static final int ERROR_MESSAGE_MAX_LENGTH = 4000;
 
+    /**
+     * 只给定时触发的记录挂上重试时间：手动触发失败就是失败，不做自动重试。
+     */
+    private static final String NEXT_RETRY_TIME_FOR_CRON =
+            "next_retry_time = CASE WHEN trigger_type = 'CRON' THEN NOW(3) ELSE NULL END";
+
     private final ExecutionLogMapper executionLogMapper;
 
     public ExecutionService(ExecutionLogMapper executionLogMapper) {
@@ -147,6 +153,8 @@ public class ExecutionService {
     /**
      * 执行器下线时，把它身上还处于 RUNNING 的执行记录标记为 FAILED。
      * <p>执行器没了，这些执行不可能再有结果；不收尾的话概览的"运行中"会一直挂着。</p>
+     * <p>定时触发的记录顺带挂上重试时间：收尾之后由失败转移换机重试，
+     * 万一转移也做不成，退避扫描还能把它捞回来——不能有"丢失路径"。</p>
      *
      * @return 受影响的记录数
      */
@@ -157,7 +165,35 @@ public class ExecutionService {
                 .eq(ExecutionLogEntity::getStatus, ExecutionStatus.RUNNING)
                 .set(ExecutionLogEntity::getStatus, ExecutionStatus.FAILED)
                 .set(ExecutionLogEntity::getEndTime, now)
-                .set(ExecutionLogEntity::getErrorMessage, reason));
+                .set(ExecutionLogEntity::getErrorMessage, reason)
+                .setSql(NEXT_RETRY_TIME_FOR_CRON));
+    }
+
+    /**
+     * 把还 RUNNING 的记录收尾成 FAILED 并挂上重试时间，交给退避扫描/失败转移接手。
+     * <p>用于收尾事件没来得及处理的兜底场景：记录必须离开 RUNNING，
+     * 否则它永远抢不到重试，也就再也不会被处理。</p>
+     */
+    public void markRunningForRetry(Long executionId, String reason) {
+        LocalDateTime now = LocalDateTime.now();
+        executionLogMapper.update(null, Wrappers.<ExecutionLogEntity>lambdaUpdate()
+                .eq(ExecutionLogEntity::getId, executionId)
+                .eq(ExecutionLogEntity::getStatus, ExecutionStatus.RUNNING)
+                .set(ExecutionLogEntity::getStatus, ExecutionStatus.FAILED)
+                .set(ExecutionLogEntity::getEndTime, now)
+                .set(ExecutionLogEntity::getErrorMessage, truncate(reason, ERROR_MESSAGE_MAX_LENGTH))
+                .setSql(NEXT_RETRY_TIME_FOR_CRON));
+    }
+
+    /**
+     * 重试预算耗尽：清掉下次重试时间，这条记录就是终态（死信）了。
+     */
+    public void markRetryExhausted(ExecutionLogEntity execution) {
+        executionLogMapper.update(null, Wrappers.<ExecutionLogEntity>lambdaUpdate()
+                .eq(ExecutionLogEntity::getId, execution.getId())
+                .in(ExecutionLogEntity::getStatus, ExecutionStatus.FAILED, ExecutionStatus.TIMEOUT)
+                .set(ExecutionLogEntity::getNextRetryTime, null));
+        execution.setNextRetryTime(null);
     }
 
     /**
@@ -255,10 +291,12 @@ public class ExecutionService {
     /**
      * 到期需要退避重试的记录（next_retry_time 已到）。
      * <p>这是内存延迟队列的兜底：调度中心重启后，待重试的记录靠这里捞回来。</p>
+     * <p>只捞定时触发的记录：手动触发失败就是失败，由用户决定要不要重来。</p>
      */
     public List<ExecutionLogEntity> listPendingRetries() {
         return executionLogMapper.selectList(Wrappers.<ExecutionLogEntity>lambdaQuery()
                 .eq(ExecutionLogEntity::getStatus, ExecutionStatus.FAILED)
+                .eq(ExecutionLogEntity::getTriggerType, TriggerType.CRON)
                 .isNotNull(ExecutionLogEntity::getNextRetryTime)
                 .le(ExecutionLogEntity::getNextRetryTime, LocalDateTime.now()));
     }

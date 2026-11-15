@@ -17,12 +17,14 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 
+import java.time.LocalDateTime;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -121,11 +123,82 @@ class ShardFailoverServiceTest {
     @Test
     void failoverSkippedWhenNoOtherExecutorOnline() {
         ExecutionLogEntity execution = failedExecution(1L, 10L);
-        when(taskService.get(1L)).thenReturn(task());
+        TaskEntity task = task();
+        when(taskService.get(1L)).thenReturn(task);
+        when(executionService.canRetry(execution, task)).thenReturn(true);
         when(executorService.listOnline()).thenReturn(List.of());
 
         service.failover(execution);
 
+        verify(triggerService, never()).dispatch(any(), any(), any(), any());
+    }
+
+    @Test
+    void failoverDefersWhenRecordIsStillRunningSoNothingIsLost() {
+        // 收尾事件没先跑（顺序异常）：RUNNING 的记录抢不动重试，
+        // 必须手动收尾并挂上重试时间，交给退避扫描兜底，绝不能停在 RUNNING。
+        ExecutionLogEntity execution = runningExecution(1L, 10L);
+        when(taskService.get(1L)).thenReturn(task());
+
+        service.failover(execution);
+
+        verify(executionService).markRunningForRetry(eq(100L), anyString());
+        verify(executionService, never()).claimForRetry(any());
+        verify(triggerService, never()).dispatch(any(), any(), any(), any());
+    }
+
+    @Test
+    void failoverRetriesRecordFinalizedByTheOfflineListener() {
+        // 完整链路：执行器下线 → 收尾把 RUNNING 变成 FAILED 并挂上 next_retry_time
+        // → 转移用原子 claim 抢到它 → 换机重跑。有预算的 RUNNING 记录必须被重试。
+        ExecutionLogEntity execution = failedExecution(1L, 10L);
+        execution.setNextRetryTime(LocalDateTime.now().minusSeconds(1));
+        TaskEntity task = task();
+        ExecutorEntity target = executor(11L, "127.0.0.1:8082");
+        Map<Integer, List<ExecutorEntity>> plan = new LinkedHashMap<>();
+        plan.put(0, List.of(target));
+
+        when(taskService.get(1L)).thenReturn(task);
+        when(executionService.canRetry(execution, task)).thenReturn(true);
+        when(executorService.listOnline()).thenReturn(List.of(target));
+        when(shardAllocatorRegistry.current()).thenReturn(shardAllocator);
+        when(shardAllocator.allocate(eq(1L), eq(2), anyList())).thenReturn(plan);
+        when(executionService.claimForRetry(execution)).thenReturn(true);
+
+        service.failover(execution);
+
+        verify(executionService).claimForRetry(execution);
+        verify(triggerService).dispatch(eq(execution), eq(task), eq(target), eq(TriggerType.CRON));
+    }
+
+    @Test
+    void failoverMarksRecordTerminalWhenRetryBudgetExhausted() {
+        // 死掉执行器上的记录没有重试预算：清掉 next_retry_time，当场落终态，不留丢失路径。
+        ExecutionLogEntity execution = failedExecution(1L, 10L);
+        execution.setNextRetryTime(LocalDateTime.now().minusSeconds(1));
+        TaskEntity task = task();
+        when(taskService.get(1L)).thenReturn(task);
+        when(executorService.listOnline()).thenReturn(List.of(executor(11L, "127.0.0.1:8082")));
+        when(executionService.canRetry(execution, task)).thenReturn(false);
+
+        service.failover(execution);
+
+        verify(executionService).markRetryExhausted(execution);
+        verify(executionService, never()).claimForRetry(any());
+        verify(triggerService, never()).dispatch(any(), any(), any(), any());
+    }
+
+    @Test
+    void failoverMarksRecordTerminalWhenTaskIsDisabled() {
+        // 任务被停用：没有重试的可能，也要落终态，不能让兜底扫描反复捞回来。
+        ExecutionLogEntity execution = failedExecution(1L, 10L);
+        TaskEntity task = task();
+        task.setStatus(TaskStatus.DISABLED);
+        when(taskService.get(1L)).thenReturn(task);
+
+        service.failover(execution);
+
+        verify(executionService).markRetryExhausted(execution);
         verify(triggerService, never()).dispatch(any(), any(), any(), any());
     }
 
@@ -140,6 +213,21 @@ class ShardFailoverServiceTest {
         execution.setShardIndex(0);
         execution.setShardTotal(2);
         execution.setStatus(ExecutionStatus.FAILED);
+        execution.setRetryCount(0);
+        return execution;
+    }
+
+    private ExecutionLogEntity runningExecution(Long taskId, Long executorId) {
+        ExecutionLogEntity execution = new ExecutionLogEntity();
+        execution.setId(100L);
+        execution.setTaskId(taskId);
+        execution.setTaskName("demo");
+        execution.setTriggerType(TriggerType.CRON);
+        execution.setExecutorId(executorId);
+        execution.setExecutorAddress("127.0.0.1:8081");
+        execution.setShardIndex(0);
+        execution.setShardTotal(2);
+        execution.setStatus(ExecutionStatus.RUNNING);
         execution.setRetryCount(0);
         return execution;
     }

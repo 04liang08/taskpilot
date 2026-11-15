@@ -14,6 +14,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.core.task.TaskRejectedException;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 
 import java.time.LocalDateTime;
@@ -52,6 +53,9 @@ class RetryServiceTest {
     @Mock
     private ScheduledExecutorService retryScheduler;
 
+    @Mock
+    private ApplicationEventPublisher eventPublisher;
+
     private ThreadPoolTaskExecutor shardExecutor;
     private RetryService retryService;
 
@@ -65,7 +69,7 @@ class RetryServiceTest {
         shardExecutor.setThreadNamePrefix("taskpilot-shard-");
         shardExecutor.initialize();
         retryService = new RetryService(taskService, executionService, executorService,
-                triggerService, retryScheduler, shardExecutor);
+                triggerService, retryScheduler, shardExecutor, eventPublisher);
     }
 
     @AfterEach
@@ -170,7 +174,7 @@ class RetryServiceTest {
         ThreadPoolTaskExecutor rejecting = mock(ThreadPoolTaskExecutor.class);
         doThrow(new TaskRejectedException("shard pool is full")).when(rejecting).execute(any(Runnable.class));
         RetryService service = new RetryService(taskService, executionService, executorService,
-                triggerService, retryScheduler, rejecting);
+                triggerService, retryScheduler, rejecting, eventPublisher);
 
         when(executionService.listPendingRetries()).thenReturn(List.of(execution));
         when(executionService.get(100L)).thenReturn(execution);
@@ -183,6 +187,39 @@ class RetryServiceTest {
 
         verify(executionService).releaseRetryClaim(eq(execution), any(LocalDateTime.class), anyString());
         verify(triggerService, never()).dispatch(any(), any(), any(), any());
+    }
+
+    @Test
+    void originalExecutorGoneHandsOverToFailoverInsteadOfDroppingTheRetry() {
+        // 原执行器已经下线：不能默默放弃这次重试，要交给失败转移换机。
+        ExecutionLogEntity execution = failedExecution();
+        TaskEntity task = task();
+        when(executionService.listPendingRetries()).thenReturn(List.of(execution));
+        when(executionService.get(100L)).thenReturn(execution);
+        when(taskService.get(1L)).thenReturn(task);
+        when(executionService.canRetry(execution, task)).thenReturn(true);
+        when(executorService.listOnline()).thenReturn(List.of());
+
+        retryService.scanPendingRetries();
+
+        verify(eventPublisher).publishEvent(any(ShardFailedEvent.class));
+        verify(triggerService, never()).dispatch(any(), any(), any(), any());
+    }
+
+    @Test
+    void exhaustedRetryBudgetMarksTheRecordTerminal() {
+        // 预算耗尽：这条记录就是终态了，不能一直被扫描捞回来。
+        ExecutionLogEntity execution = failedExecution();
+        TaskEntity task = task();
+        when(executionService.listPendingRetries()).thenReturn(List.of(execution));
+        when(executionService.get(100L)).thenReturn(execution);
+        when(taskService.get(1L)).thenReturn(task);
+        when(executionService.canRetry(execution, task)).thenReturn(false);
+
+        retryService.scanPendingRetries();
+
+        verify(executionService).markRetryExhausted(execution);
+        verify(eventPublisher, never()).publishEvent(any(ShardFailedEvent.class));
     }
 
     private ExecutionLogEntity failedExecution() {

@@ -8,6 +8,7 @@ import com.taskpilot.scheduler.shard.ShardFailedEvent;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.context.event.EventListener;
 import org.springframework.core.task.TaskRejectedException;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -59,6 +60,7 @@ public class RetryService {
     private final TriggerService triggerService;
     private final ScheduledExecutorService retryScheduler;
     private final ThreadPoolTaskExecutor shardExecutor;
+    private final ApplicationEventPublisher eventPublisher;
 
     /** 本地去重：同一条记录同时只安排一个延迟重试。 */
     private final Set<Long> scheduled = ConcurrentHashMap.newKeySet();
@@ -68,13 +70,15 @@ public class RetryService {
                         ExecutorService executorService,
                         TriggerService triggerService,
                         @Qualifier("retryScheduler") ScheduledExecutorService retryScheduler,
-                        @Qualifier("shardExecutor") ThreadPoolTaskExecutor shardExecutor) {
+                        @Qualifier("shardExecutor") ThreadPoolTaskExecutor shardExecutor,
+                        ApplicationEventPublisher eventPublisher) {
         this.taskService = taskService;
         this.executionService = executionService;
         this.executorService = executorService;
         this.triggerService = triggerService;
         this.retryScheduler = retryScheduler;
         this.shardExecutor = shardExecutor;
+        this.eventPublisher = eventPublisher;
     }
 
     /**
@@ -151,12 +155,14 @@ public class RetryService {
             return;
         }
         if (!executionService.canRetry(execution, task)) {
+            // 预算耗尽：清掉下次重试时间，这条记录就是终态（死信）了，别再被扫描捞回来。
+            executionService.markRetryExhausted(execution);
             return;
         }
         ExecutorEntity executor = onlineExecutor(execution.getExecutorId());
         if (executor == null) {
-            // 原执行器没了：交给失败转移。
-            log.info("backoff retry skipped, original executor gone: executionId={}", executionId);
+            // 原执行器没了：不能默默放弃，交给失败转移换一台机器重试。
+            handOverToFailover(execution);
             return;
         }
         if (!executionService.claimForRetry(execution)) {
@@ -167,6 +173,18 @@ public class RetryService {
                 execution.getId(), task.getId(), execution.getShardIndex(), execution.getShardTotal(),
                 execution.getRetryCount(), executor.getAddress());
         submitDispatch(execution, task, executor);
+    }
+
+    /**
+     * 原执行器不在了：把这次重试交回失败转移去换机。
+     * <p>发事件而不是直接调失败转移：两者都依赖触发链路，事件能保持解耦，
+     * 也让"失败转移"只有一个入口。</p>
+     */
+    private void handOverToFailover(ExecutionLogEntity execution) {
+        log.info("backoff retry handed over to failover: executionId={}, executorId={}",
+                execution.getId(), execution.getExecutorId());
+        eventPublisher.publishEvent(new ShardFailedEvent(
+                execution.getId(), execution.getTaskId(), execution.getExecutorId()));
     }
 
     /**
