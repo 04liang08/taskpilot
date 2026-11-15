@@ -7,19 +7,29 @@ import com.taskpilot.scheduler.entity.ExecutionLogEntity;
 import com.taskpilot.scheduler.entity.ExecutorEntity;
 import com.taskpilot.scheduler.entity.TaskEntity;
 import com.taskpilot.scheduler.shard.ShardFailedEvent;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.core.task.TaskRejectedException;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -42,12 +52,25 @@ class RetryServiceTest {
     @Mock
     private ScheduledExecutorService retryScheduler;
 
+    private ThreadPoolTaskExecutor shardExecutor;
     private RetryService retryService;
 
     @BeforeEach
     void setUp() {
+        // 真实线程池：重试的执行是异步提交到这里的，测试要能看出线程边界。
+        shardExecutor = new ThreadPoolTaskExecutor();
+        shardExecutor.setCorePoolSize(2);
+        shardExecutor.setMaxPoolSize(4);
+        shardExecutor.setQueueCapacity(16);
+        shardExecutor.setThreadNamePrefix("taskpilot-shard-");
+        shardExecutor.initialize();
         retryService = new RetryService(taskService, executionService, executorService,
-                triggerService, retryScheduler);
+                triggerService, retryScheduler, shardExecutor);
+    }
+
+    @AfterEach
+    void tearDown() {
+        shardExecutor.shutdown();
     }
 
     @Test
@@ -93,9 +116,62 @@ class RetryServiceTest {
     }
 
     @Test
-    void scanPendingRetriesRetriesDueRecords() {
+    void scanPendingRetriesRetriesDueRecords() throws Exception {
         ExecutionLogEntity execution = failedExecution();
         TaskEntity task = task();
+        CountDownLatch dispatched = new CountDownLatch(1);
+        when(executionService.listPendingRetries()).thenReturn(List.of(execution));
+        when(executionService.get(100L)).thenReturn(execution);
+        when(taskService.get(1L)).thenReturn(task);
+        when(executionService.canRetry(execution, task)).thenReturn(true);
+        when(executorService.listOnline()).thenReturn(List.of(executor(10L)));
+        when(executionService.claimForRetry(execution)).thenReturn(true);
+        doAnswer(invocation -> {
+            dispatched.countDown();
+            return null;
+        }).when(triggerService).dispatch(any(), any(), any(), any());
+
+        retryService.scanPendingRetries();
+
+        assertThat(dispatched.await(5, TimeUnit.SECONDS)).isTrue();
+        verify(triggerService).dispatch(eq(execution), eq(task), any(ExecutorEntity.class), eq(TriggerType.CRON));
+    }
+
+    @Test
+    void dispatchDoesNotRunOnTheSchedulingThread() throws Exception {
+        // @Scheduled 默认单线程：在这里同步发 HTTP 会把健康检查、僵尸回收一起堵住。
+        ExecutionLogEntity execution = failedExecution();
+        TaskEntity task = task();
+        CountDownLatch dispatched = new CountDownLatch(1);
+        AtomicReference<String> threadName = new AtomicReference<>();
+        when(executionService.listPendingRetries()).thenReturn(List.of(execution));
+        when(executionService.get(100L)).thenReturn(execution);
+        when(taskService.get(1L)).thenReturn(task);
+        when(executionService.canRetry(execution, task)).thenReturn(true);
+        when(executorService.listOnline()).thenReturn(List.of(executor(10L)));
+        when(executionService.claimForRetry(execution)).thenReturn(true);
+        doAnswer(invocation -> {
+            threadName.set(Thread.currentThread().getName());
+            dispatched.countDown();
+            return null;
+        }).when(triggerService).dispatch(any(), any(), any(), any());
+
+        retryService.scanPendingRetries();
+
+        assertThat(dispatched.await(5, TimeUnit.SECONDS)).isTrue();
+        assertThat(threadName.get()).startsWith("taskpilot-shard-");
+    }
+
+    @Test
+    void rejectedDispatchReleasesClaimSoFallbackScanCanRetry() {
+        // 分片池满了：既不能把记录卡在 RUNNING，也不能丢掉这次重试。
+        ExecutionLogEntity execution = failedExecution();
+        TaskEntity task = task();
+        ThreadPoolTaskExecutor rejecting = mock(ThreadPoolTaskExecutor.class);
+        doThrow(new TaskRejectedException("shard pool is full")).when(rejecting).execute(any(Runnable.class));
+        RetryService service = new RetryService(taskService, executionService, executorService,
+                triggerService, retryScheduler, rejecting);
+
         when(executionService.listPendingRetries()).thenReturn(List.of(execution));
         when(executionService.get(100L)).thenReturn(execution);
         when(taskService.get(1L)).thenReturn(task);
@@ -103,9 +179,10 @@ class RetryServiceTest {
         when(executorService.listOnline()).thenReturn(List.of(executor(10L)));
         when(executionService.claimForRetry(execution)).thenReturn(true);
 
-        retryService.scanPendingRetries();
+        service.scanPendingRetries();
 
-        verify(triggerService).dispatch(eq(execution), eq(task), any(ExecutorEntity.class), eq(TriggerType.CRON));
+        verify(executionService).releaseRetryClaim(eq(execution), any(LocalDateTime.class), anyString());
+        verify(triggerService, never()).dispatch(any(), any(), any(), any());
     }
 
     private ExecutionLogEntity failedExecution() {

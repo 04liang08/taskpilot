@@ -217,6 +217,33 @@ public class ExecutionService {
     }
 
     /**
+     * 抢占成功但没能真正执行（分片线程池满了等）：把记录放回 FAILED 并保留下次重试时间，
+     * 让兜底扫描能重新捞回来。
+     * <p>绝不能把记录留在 RUNNING——那意味着没人再管它，只能等僵尸回收超时才收尾。
+     * 重试预算也要还回去：这次根本没跑成，不该消耗一次重试机会。</p>
+     */
+    public void releaseRetryClaim(ExecutionLogEntity execution,
+                                  LocalDateTime nextRetryTime,
+                                  String reason) {
+        LocalDateTime now = LocalDateTime.now();
+        executionLogMapper.update(null, Wrappers.<ExecutionLogEntity>lambdaUpdate()
+                .eq(ExecutionLogEntity::getId, execution.getId())
+                .eq(ExecutionLogEntity::getStatus, ExecutionStatus.RUNNING)
+                .set(ExecutionLogEntity::getStatus, ExecutionStatus.FAILED)
+                .set(ExecutionLogEntity::getEndTime, now)
+                .set(ExecutionLogEntity::getErrorMessage, truncate(reason, ERROR_MESSAGE_MAX_LENGTH))
+                .set(ExecutionLogEntity::getNextRetryTime, nextRetryTime)
+                .setSql("retry_count = GREATEST(retry_count - 1, 0)"));
+        execution.setStatus(ExecutionStatus.FAILED);
+        execution.setEndTime(now);
+        execution.setErrorMessage(reason);
+        execution.setNextRetryTime(nextRetryTime);
+        if (execution.getRetryCount() != null && execution.getRetryCount() > 0) {
+            execution.setRetryCount(execution.getRetryCount() - 1);
+        }
+    }
+
+    /**
      * 还能不能再重试：已重试次数 < 任务配置的最大重试次数。
      */
     public boolean canRetry(ExecutionLogEntity execution, TaskEntity task) {

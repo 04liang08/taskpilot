@@ -9,7 +9,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.context.event.EventListener;
+import org.springframework.core.task.TaskRejectedException;
 import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
@@ -33,6 +35,10 @@ import java.util.concurrent.TimeUnit;
  *
  * <p>重试状态落在 {@code next_retry_time} 里：内存里的延迟队列只是快路径，
  * 调度中心重启后由定时扫描把到期的重试捞回来。</p>
+ *
+ * <p><b>线程模型</b>：{@code @Scheduled} 与 retryScheduler 都是单线程的，
+ * 真正的执行（同步 HTTP 调用执行器）提交到分片线程池。否则一个耗时任务
+ * 就会把调度线程占住，健康检查、僵尸回收等定时任务全部停摆。</p>
  */
 @Service
 public class RetryService {
@@ -42,11 +48,17 @@ public class RetryService {
     private static final long MAX_BACKOFF_SECONDS = 300;
     private static final int MAX_BACKOFF_SHIFT = 5;
 
+    /**
+     * 分片池满了导致重试没发出去时，隔多久再由兜底扫描捞回来。
+     */
+    private static final long RELEASE_RETRY_DELAY_SECONDS = 5;
+
     private final TaskService taskService;
     private final ExecutionService executionService;
     private final ExecutorService executorService;
     private final TriggerService triggerService;
     private final ScheduledExecutorService retryScheduler;
+    private final ThreadPoolTaskExecutor shardExecutor;
 
     /** 本地去重：同一条记录同时只安排一个延迟重试。 */
     private final Set<Long> scheduled = ConcurrentHashMap.newKeySet();
@@ -55,12 +67,14 @@ public class RetryService {
                         ExecutionService executionService,
                         ExecutorService executorService,
                         TriggerService triggerService,
-                        @Qualifier("retryScheduler") ScheduledExecutorService retryScheduler) {
+                        @Qualifier("retryScheduler") ScheduledExecutorService retryScheduler,
+                        @Qualifier("shardExecutor") ThreadPoolTaskExecutor shardExecutor) {
         this.taskService = taskService;
         this.executionService = executionService;
         this.executorService = executorService;
         this.triggerService = triggerService;
         this.retryScheduler = retryScheduler;
+        this.shardExecutor = shardExecutor;
     }
 
     /**
@@ -121,7 +135,9 @@ public class RetryService {
                     execution.getId(), task.getId(), execution.getRetryCount(), task.getRetryMax(), delaySeconds);
         } catch (RejectedExecutionException e) {
             scheduled.remove(execution.getId());
-            log.error("backoff retry rejected: executionId={}", execution.getId());
+            // 延迟队列都排不进去了，但记录上的 next_retry_time 已经写好，
+            // 兜底扫描照样能把它捞回来，不用在这里额外处理。
+            log.error("backoff retry rejected by retry scheduler: executionId={}", execution.getId());
         }
     }
 
@@ -150,7 +166,26 @@ public class RetryService {
         log.warn("backoff retry: executionId={}, taskId={}, shard={}/{}, retryCount={}, executor={}",
                 execution.getId(), task.getId(), execution.getShardIndex(), execution.getShardTotal(),
                 execution.getRetryCount(), executor.getAddress());
-        triggerService.dispatch(execution, task, executor, execution.getTriggerType());
+        submitDispatch(execution, task, executor);
+    }
+
+    /**
+     * 真正执行丢到分片线程池：调度线程只负责读库和排队。
+     * <p>{@code @Scheduled} 与 retryScheduler 都是单线程的，在这里同步发 HTTP
+     * 会把整个调度线程占住，健康检查、僵尸回收都跟着停摆。</p>
+     */
+    private void submitDispatch(ExecutionLogEntity execution, TaskEntity task, ExecutorEntity executor) {
+        try {
+            shardExecutor.execute(() ->
+                    triggerService.dispatch(execution, task, executor, execution.getTriggerType()));
+        } catch (TaskRejectedException e) {
+            // 分片池满了：既不能把记录卡在 RUNNING（那就没人再管它了），
+            // 也不能直接丢掉这次重试。放回 FAILED 并保留下次重试时间，交给兜底扫描重来。
+            executionService.releaseRetryClaim(execution,
+                    LocalDateTime.now().plusSeconds(RELEASE_RETRY_DELAY_SECONDS),
+                    "分片执行线程池已满，等待重试");
+            log.error("backoff retry deferred, shard pool is full: executionId={}", execution.getId());
+        }
     }
 
     /**

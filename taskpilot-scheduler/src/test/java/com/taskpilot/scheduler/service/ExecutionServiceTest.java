@@ -10,6 +10,10 @@ import com.taskpilot.scheduler.entity.TaskEntity;
 import com.taskpilot.scheduler.dto.CreatedExecution;
 import com.taskpilot.scheduler.leader.LeaderContext;
 import com.taskpilot.scheduler.mapper.ExecutionLogMapper;
+import com.baomidou.mybatisplus.core.MybatisConfiguration;
+import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
+import org.apache.ibatis.builder.MapperBuilderAssistant;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
@@ -22,6 +26,7 @@ import java.time.LocalDateTime;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -33,6 +38,13 @@ class ExecutionServiceTest {
 
     @InjectMocks
     private ExecutionService executionService;
+
+    @BeforeEach
+    void initTableInfo() {
+        // 纯 Mockito 单测没有 MyBatis 会话，手动初始化 Lambda 字段缓存。
+        MapperBuilderAssistant assistant = new MapperBuilderAssistant(new MybatisConfiguration(), "ExecutionLogEntity");
+        TableInfoHelper.initTableInfo(assistant, ExecutionLogEntity.class);
+    }
 
     @Test
     void createRunningReturnsExistingRecordWhenKeyIsDuplicated() {
@@ -138,6 +150,23 @@ class ExecutionServiceTest {
         assertThat(captor.getValue().getErrorMessage()).isEqualTo("没有可用的在线执行器");
         assertThat(captor.getValue().getExecutorId()).isNull();
         assertThat(execution.getId()).isEqualTo(105L);
+    }
+
+    @Test
+    void releaseRetryClaimPutsRecordBackToFailedSoFallbackScanCanRetry() {
+        // 分片池满导致重试没发出去：不能把记录卡在 RUNNING，也不能白白消耗重试预算。
+        ExecutionLogEntity execution = runningExecution(106L);
+        execution.setRetryCount(1);
+
+        executionService.releaseRetryClaim(execution,
+                LocalDateTime.now().plusSeconds(5), "分片执行线程池已满，等待重试");
+
+        assertThat(execution.getStatus()).isEqualTo(ExecutionStatus.FAILED);
+        assertThat(execution.getNextRetryTime()).isNotNull();
+        assertThat(execution.getErrorMessage()).contains("线程池已满");
+        // 这次根本没跑成，重试预算要还回去。
+        assertThat(execution.getRetryCount()).isEqualTo(0);
+        verify(executionLogMapper).update(isNull(), any());
     }
 
     private void stubUpdateAndReload(ExecutionLogEntity execution) {

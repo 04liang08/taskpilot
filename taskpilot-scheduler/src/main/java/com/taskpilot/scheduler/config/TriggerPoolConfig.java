@@ -53,7 +53,8 @@ public class TriggerPoolConfig {
     }
 
     /**
-     * 退避重试的延迟调度器。只负责"到点叫醒"，实际执行在分片线程池里。
+     * 退避重试的延迟调度器。只负责"到点叫醒"，真正的执行会提交到分片线程池。
+     * <p>所以单线程就够：醒来后只做读库和排队，不发同步 HTTP。</p>
      */
     @Bean(name = "retryScheduler", destroyMethod = "shutdown")
     public ScheduledExecutorService retryScheduler() {

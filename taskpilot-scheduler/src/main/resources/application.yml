@@ -5,6 +5,13 @@ server:
 spring:
   application:
     name: taskpilot-scheduler
+  task:
+    scheduling:
+      # @Scheduled 默认只有 1 个线程：执行器健康检查、僵尸记录回收、退避重试扫描
+      # 会互相阻塞。退避重试的真正执行已经放到分片线程池，这里仍留出余量。
+      pool:
+        size: 4
+      thread-name-prefix: taskpilot-sched-
   jackson:
     time-zone: Asia/Shanghai
     date-format: yyyy-MM-dd HH:mm:ss.SSS
