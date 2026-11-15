@@ -53,6 +53,8 @@ public class ExecutionLogEntity {
 
     private String leaderInstance;
 
+    private LocalDateTime nextRetryTime;
+
     private Long durationMs;
 
     private String errorMessage;

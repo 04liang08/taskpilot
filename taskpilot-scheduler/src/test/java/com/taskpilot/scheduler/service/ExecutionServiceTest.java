@@ -7,6 +7,7 @@ import com.taskpilot.common.enums.TriggerType;
 import com.taskpilot.scheduler.entity.ExecutionLogEntity;
 import com.taskpilot.scheduler.entity.ExecutorEntity;
 import com.taskpilot.scheduler.entity.TaskEntity;
+import com.taskpilot.scheduler.dto.CreatedExecution;
 import com.taskpilot.scheduler.leader.LeaderContext;
 import com.taskpilot.scheduler.mapper.ExecutionLogMapper;
 import org.junit.jupiter.api.Test;
@@ -15,6 +16,7 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.dao.DuplicateKeyException;
 
 import java.time.LocalDateTime;
 
@@ -33,14 +35,32 @@ class ExecutionServiceTest {
     private ExecutionService executionService;
 
     @Test
+    void createRunningReturnsExistingRecordWhenKeyIsDuplicated() {
+        // 幂等键已存在：说明这次触发是重复的，不应该再执行一遍。
+        when(executionLogMapper.insert(any(ExecutionLogEntity.class)))
+                .thenThrow(new DuplicateKeyException("duplicate execution_key"));
+        ExecutionLogEntity existing = new ExecutionLogEntity();
+        existing.setId(200L);
+        existing.setExecutionKey("key-1");
+        when(executionLogMapper.selectOne(any())).thenReturn(existing);
+
+        CreatedExecution result = executionService.createRunning(task(), executor(), TriggerType.MANUAL,
+                LeaderContext.none(), 0, 1, "key-1");
+
+        assertThat(result.created()).isFalse();
+        assertThat(result.entity().getId()).isEqualTo(200L);
+    }
+
+    @Test
     void createRunningPersistsRunningRecordWithUuid() {
         when(executionLogMapper.insert(any(ExecutionLogEntity.class))).thenAnswer(invocation -> {
             ((ExecutionLogEntity) invocation.getArgument(0)).setId(100L);
             return 1;
         });
 
-        ExecutionLogEntity execution = executionService.createRunning(task(), executor(), TriggerType.MANUAL,
-                LeaderContext.none(), 0, 1);
+        CreatedExecution created = executionService.createRunning(task(), executor(), TriggerType.MANUAL,
+                LeaderContext.none(), 0, 1, "key-1");
+        ExecutionLogEntity execution = created.entity();
 
         assertThat(execution.getId()).isEqualTo(100L);
         assertThat(execution.getExecutionKey()).isNotBlank();

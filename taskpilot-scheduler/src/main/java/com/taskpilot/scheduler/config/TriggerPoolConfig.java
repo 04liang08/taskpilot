@@ -5,6 +5,8 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadPoolExecutor;
 
 /**
@@ -48,5 +50,17 @@ public class TriggerPoolConfig {
         executor.setAwaitTerminationSeconds(20);
         executor.initialize();
         return executor;
+    }
+
+    /**
+     * 退避重试的延迟调度器。只负责"到点叫醒"，实际执行在分片线程池里。
+     */
+    @Bean(name = "retryScheduler", destroyMethod = "shutdown")
+    public ScheduledExecutorService retryScheduler() {
+        return Executors.newSingleThreadScheduledExecutor(runnable -> {
+            Thread thread = new Thread(runnable, "taskpilot-retry");
+            thread.setDaemon(true);
+            return thread;
+        });
     }
 }

@@ -38,7 +38,8 @@ public interface ExecutionLogMapper extends BaseMapper<ExecutionLogEntity> {
                    retry_count = retry_count + 1,
                    start_time = NOW(3),
                    end_time = NULL,
-                   error_message = NULL
+                   error_message = NULL,
+                   next_retry_time = NULL
              WHERE id = #{id}
                AND status IN ('FAILED', 'TIMEOUT')
             """)

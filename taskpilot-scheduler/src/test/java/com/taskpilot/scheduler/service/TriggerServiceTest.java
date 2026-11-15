@@ -8,6 +8,7 @@ import com.taskpilot.common.enums.TriggerType;
 import com.taskpilot.common.exception.BizException;
 import com.taskpilot.common.exception.ErrorCode;
 import com.taskpilot.scheduler.client.ExecutorClient;
+import com.taskpilot.scheduler.dto.CreatedExecution;
 import com.taskpilot.scheduler.dto.TriggerResult;
 import com.taskpilot.scheduler.entity.ExecutionLogEntity;
 import com.taskpilot.scheduler.entity.ExecutorEntity;
@@ -110,8 +111,8 @@ class TriggerServiceTest {
         finished.setDurationMs(9L);
         when(taskService.get(1L)).thenReturn(task);
         when(executorService.listOnline()).thenReturn(List.of(executor));
-        when(executionService.createRunning(eq(task), eq(executor), eq(TriggerType.MANUAL), any(), anyInt(), anyInt()))
-                .thenReturn(running);
+        when(executionService.createRunning(eq(task), eq(executor), eq(TriggerType.MANUAL), any(), anyInt(), anyInt(),
+                anyString())).thenReturn(new CreatedExecution(running, true));
         when(executorClient.execute(eq("127.0.0.1:8081"), any(ExecuteRequest.class)))
                 .thenReturn(ExecuteResult.success("ok", 9));
         when(executionService.complete(eq(running), any(ExecuteResult.class))).thenReturn(finished);
@@ -170,8 +171,8 @@ class TriggerServiceTest {
         failed.setStatus(ExecutionStatus.FAILED);
         when(taskService.get(1L)).thenReturn(task);
         when(executorService.listOnline()).thenReturn(List.of(executor));
-        when(executionService.createRunning(eq(task), eq(executor), eq(TriggerType.MANUAL), any(), anyInt(), anyInt()))
-                .thenReturn(running);
+        when(executionService.createRunning(eq(task), eq(executor), eq(TriggerType.MANUAL), any(), anyInt(), anyInt(),
+                anyString())).thenReturn(new CreatedExecution(running, true));
         when(executorClient.execute(eq("127.0.0.1:8081"), any(ExecuteRequest.class)))
                 .thenThrow(new ResourceAccessException("Connection refused"));
         when(executionService.markFailed(eq(running), anyString())).thenReturn(failed);
@@ -193,8 +194,8 @@ class TriggerServiceTest {
         ExecutionLogEntity running = runningExecution(203L);
         when(taskService.get(1L)).thenReturn(task);
         when(executorService.listOnline()).thenReturn(List.of(executor));
-        when(executionService.createRunning(eq(task), eq(executor), eq(TriggerType.MANUAL), any(), anyInt(), anyInt()))
-                .thenReturn(running);
+        when(executionService.createRunning(eq(task), eq(executor), eq(TriggerType.MANUAL), any(), anyInt(), anyInt(),
+                anyString())).thenReturn(new CreatedExecution(running, true));
         when(executorClient.execute(eq("127.0.0.1:8081"), any(ExecuteRequest.class)))
                 .thenAnswer(invocation -> {
                     entered.countDown();
@@ -241,11 +242,12 @@ class TriggerServiceTest {
 
         AtomicLong sequence = new AtomicLong(300L);
         when(executionService.createRunning(eq(task), any(ExecutorEntity.class), eq(TriggerType.MANUAL),
-                any(), anyInt(), eq(3))).thenAnswer(invocation -> {
+                any(), anyInt(), eq(3), anyString())).thenAnswer(invocation -> {
+            int shardIndex = invocation.getArgument(4);
             ExecutionLogEntity execution = runningExecution(sequence.incrementAndGet());
-            execution.setShardIndex(invocation.getArgument(4));
+            execution.setShardIndex(shardIndex);
             execution.setShardTotal(3);
-            return execution;
+            return new CreatedExecution(execution, true);
         });
         when(executorClient.execute(anyString(), any(ExecuteRequest.class)))
                 .thenReturn(ExecuteResult.success("ok", 5));
@@ -287,12 +289,12 @@ class TriggerServiceTest {
         when(shardAllocatorRegistry.current()).thenReturn(shardAllocator);
         when(shardAllocator.allocate(eq(1L), eq(2), anyList())).thenReturn(plan);
         when(executionService.createRunning(eq(task), any(ExecutorEntity.class), eq(TriggerType.MANUAL),
-                any(), anyInt(), eq(2))).thenAnswer(invocation -> {
+                any(), anyInt(), eq(2), anyString())).thenAnswer(invocation -> {
             int shardIndex = invocation.getArgument(4);
             ExecutionLogEntity execution = runningExecution(400L + shardIndex);
             execution.setShardIndex(shardIndex);
             execution.setShardTotal(2);
-            return execution;
+            return new CreatedExecution(execution, true);
         });
         when(executorClient.execute(anyString(), any(ExecuteRequest.class))).thenAnswer(invocation -> {
             entered.countDown();

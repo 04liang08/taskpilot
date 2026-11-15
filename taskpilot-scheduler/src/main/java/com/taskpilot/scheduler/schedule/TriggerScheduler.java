@@ -256,9 +256,9 @@ public class TriggerScheduler {
             return;
         }
         LeaderContext leaderContext = leaderElectionService.currentContext();
-        triggerService.triggerAsync(taskId, leaderContext);
-
         LocalDateTime scheduledTime = toLocalDateTime(scheduledEpochSecond);
+        triggerService.triggerAsync(taskId, leaderContext, scheduledTime);
+
         LocalDateTime now = LocalDateTime.now(ZONE);
         LocalDateTime next = cronService.nextTimeAfter(scheduled.cronExpression(), scheduledTime);
         if (next == null) {
@@ -315,7 +315,7 @@ public class TriggerScheduler {
     private void catchUpTask(TaskEntity task, LocalDateTime scheduled, LocalDateTime now) {
         log.info("misfire catch-up: taskId={}, scheduled={}, now={}", task.getId(), scheduled, now);
         cache.put(task.getId(), new ScheduledTask(task.getId(), task.getTaskName(), task.getCronExpression()));
-        triggerService.triggerAsync(task.getId(), leaderElectionService.currentContext());
+        triggerService.triggerAsync(task.getId(), leaderElectionService.currentContext(), scheduled);
 
         LocalDateTime next = cronService.nextTimeAfter(task.getCronExpression(), now);
         if (next == null) {

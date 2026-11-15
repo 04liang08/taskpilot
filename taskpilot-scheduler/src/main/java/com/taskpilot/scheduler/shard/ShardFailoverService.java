@@ -120,6 +120,12 @@ public class ShardFailoverService {
                         execution.getId(), execution.getExecutorId());
                 return;
             }
+            if (!executionService.canRetry(execution, task)) {
+                // 重试预算用完：这条记录就是终态（死信），不再换机重试。
+                log.warn("shard failover skipped, no retry budget left: executionId={}, retryCount={}, maxRetry={}",
+                        execution.getId(), execution.getRetryCount(), task.getRetryMax());
+                return;
+            }
             List<ExecutorEntity> candidates = executorService.listOnline().stream()
                     .filter(executor -> !executor.getId().equals(execution.getExecutorId()))
                     .toList();

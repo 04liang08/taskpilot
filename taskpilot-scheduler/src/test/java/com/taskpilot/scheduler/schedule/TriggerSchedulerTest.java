@@ -106,7 +106,7 @@ class TriggerSchedulerTest {
         scheduler.tick(dueEpoch - 1);
         scheduler.tick(dueEpoch);
 
-        verify(triggerService).triggerAsync(eq(1L), eq(new LeaderContext(7L, "inst-a")));
+        verify(triggerService).triggerAsync(eq(1L), eq(new LeaderContext(7L, "inst-a")), any());
         verify(taskService).updateNextTriggerTime(eq(1L), eq(next));
     }
 
@@ -119,7 +119,7 @@ class TriggerSchedulerTest {
         scheduler.tick(dueEpoch - 1);
         scheduler.tick(dueEpoch);
 
-        verify(triggerService, never()).triggerAsync(any(), any());
+        verify(triggerService, never()).triggerAsync(any(), any(), any());
     }
 
     @Test
@@ -136,7 +136,7 @@ class TriggerSchedulerTest {
         scheduler.tick(dueEpoch - 1);
         scheduler.tick(dueEpoch);
 
-        verify(triggerService, never()).triggerAsync(any(), any());
+        verify(triggerService, never()).triggerAsync(any(), any(), any());
     }
 
     @Test
@@ -152,7 +152,7 @@ class TriggerSchedulerTest {
         scheduler.tick(dueEpoch - 1);
         scheduler.tick(dueEpoch);
 
-        verify(triggerService, never()).triggerAsync(any(), any());
+        verify(triggerService, never()).triggerAsync(any(), any(), any());
     }
 
     @Test
@@ -170,7 +170,7 @@ class TriggerSchedulerTest {
         scheduler.tick(dueEpoch - 1);
         scheduler.tick(dueEpoch);
 
-        verify(triggerService, never()).triggerAsync(any(), any());
+        verify(triggerService, never()).triggerAsync(any(), any(), any());
     }
 
     @Test
@@ -208,7 +208,7 @@ class TriggerSchedulerTest {
         scheduler.loadTasks();
 
         // 补跑立即发生一次（不再等时间槽轮转回来）。
-        verify(triggerService, times(1)).triggerAsync(eq(1L), any());
+        verify(triggerService, times(1)).triggerAsync(eq(1L), any(), any());
         // 并且把下次触发时间推进到未来，不会连着补一串。
         ArgumentCaptor<LocalDateTime> captor = ArgumentCaptor.forClass(LocalDateTime.class);
         verify(taskService, atLeastOnce()).updateNextTriggerTime(eq(1L), captor.capture());
@@ -233,7 +233,7 @@ class TriggerSchedulerTest {
         scheduler.loadTasks();
         scheduler.loadTasks();
 
-        verify(triggerService, times(1)).triggerAsync(eq(1L), any());
+        verify(triggerService, times(1)).triggerAsync(eq(1L), any(), any());
     }
 
     @Test
@@ -255,7 +255,7 @@ class TriggerSchedulerTest {
         scheduler.tick(expiredEpoch);
         scheduler.tick(expiredEpoch + 1);
 
-        verify(triggerService, never()).triggerAsync(any(), any());
+        verify(triggerService, never()).triggerAsync(any(), any(), any());
     }
 
     private TaskEntity task(Long id, LocalDateTime nextTriggerTime) {

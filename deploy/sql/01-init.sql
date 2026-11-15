@@ -68,6 +68,7 @@ CREATE TABLE IF NOT EXISTS tp_execution_log (
   retry_count INT NOT NULL DEFAULT 0,
   fencing_token BIGINT NOT NULL DEFAULT 0 COMMENT '产生该记录的 leader fencing token',
   leader_instance VARCHAR(64) NULL COMMENT '产生该记录的调度实例',
+  next_retry_time DATETIME(3) NULL COMMENT '下次退避重试时间；为空表示已终态',
   duration_ms BIGINT NULL,
   error_message TEXT NULL,
   result_summary VARCHAR(1024) NULL,

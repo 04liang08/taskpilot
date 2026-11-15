@@ -52,6 +52,8 @@ taskpilot:
     # 僵尸 RUNNING 记录回收：任务超时时间 + 宽限 秒
     stale-grace-seconds: 60
     recovery-interval-seconds: 60
+    # 退避重试的兜底扫描间隔（内存延迟队列丢失后靠它捞回来）
+    retry-scan-interval-seconds: 10
   scheduler:
     # 时间轮：槽位数按秒对齐，一个槽位代表一轮里的同一秒。
     wheel-size: 60

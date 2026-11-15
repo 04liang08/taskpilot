@@ -9,12 +9,14 @@ import com.taskpilot.common.enums.ExecutionStatus;
 import com.taskpilot.common.enums.TriggerType;
 import com.taskpilot.common.exception.BizException;
 import com.taskpilot.common.exception.ErrorCode;
+import com.taskpilot.scheduler.dto.CreatedExecution;
 import com.taskpilot.scheduler.dto.ExecutionQuery;
 import com.taskpilot.scheduler.entity.ExecutionLogEntity;
 import com.taskpilot.scheduler.entity.ExecutorEntity;
 import com.taskpilot.scheduler.entity.TaskEntity;
 import com.taskpilot.scheduler.leader.LeaderContext;
 import com.taskpilot.scheduler.mapper.ExecutionLogMapper;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 
 import java.time.Duration;
@@ -39,17 +41,20 @@ public class ExecutionService {
     }
 
     /**
-     * 落 RUNNING 记录。execution_key 使用 UUID，允许重复手动触发。
+     * 落 RUNNING 记录。
+     * <p>executionKey 是幂等键：手动触发用 UUID，定时触发用确定性键。
+     * 同一个幂等键已经落过库时返回已有记录且 {@code created=false}，调用方据此跳过重复执行。</p>
      */
-    public ExecutionLogEntity createRunning(TaskEntity task,
-                                            ExecutorEntity executor,
-                                            TriggerType triggerType,
-                                            LeaderContext leaderContext,
-                                            int shardIndex,
-                                            int shardTotal) {
+    public CreatedExecution createRunning(TaskEntity task,
+                                          ExecutorEntity executor,
+                                          TriggerType triggerType,
+                                          LeaderContext leaderContext,
+                                          int shardIndex,
+                                          int shardTotal,
+                                          String executionKey) {
         LocalDateTime now = LocalDateTime.now();
         ExecutionLogEntity entity = new ExecutionLogEntity();
-        entity.setExecutionKey(UUID.randomUUID().toString());
+        entity.setExecutionKey(executionKey);
         entity.setTaskId(task.getId());
         entity.setTaskName(task.getTaskName());
         entity.setTriggerType(triggerType);
@@ -63,8 +68,19 @@ public class ExecutionService {
         entity.setRetryCount(0);
         entity.setFencingToken(leaderContext.fencingToken());
         entity.setLeaderInstance(leaderContext.instanceId());
-        executionLogMapper.insert(entity);
-        return entity;
+        try {
+            executionLogMapper.insert(entity);
+            return new CreatedExecution(entity, true);
+        } catch (DuplicateKeyException e) {
+            // 幂等键已存在：说明这次触发是重复的，直接复用已有记录，不再执行一遍。
+            ExecutionLogEntity existing = executionLogMapper.selectOne(
+                    Wrappers.<ExecutionLogEntity>lambdaQuery()
+                            .eq(ExecutionLogEntity::getExecutionKey, executionKey));
+            if (existing != null) {
+                return new CreatedExecution(existing, false);
+            }
+            throw e;
+        }
     }
 
     /**
@@ -161,6 +177,7 @@ public class ExecutionService {
         execution.setStartTime(LocalDateTime.now());
         execution.setEndTime(null);
         execution.setErrorMessage(null);
+        execution.setNextRetryTime(null);
         return true;
     }
 
@@ -173,6 +190,50 @@ public class ExecutionService {
                 .eq(ExecutionLogEntity::getExecutorId, executorId)
                 .in(ExecutionLogEntity::getStatus,
                         ExecutionStatus.RUNNING, ExecutionStatus.FAILED, ExecutionStatus.TIMEOUT));
+    }
+
+    /**
+     * 失败并安排退避重试。
+     * <p>nextRetryTime 为空表示这次失败就是终态（不再重试）。</p>
+     */
+    public ExecutionLogEntity markFailedForRetry(ExecutionLogEntity execution,
+                                                 String errorMessage,
+                                                 LocalDateTime nextRetryTime) {
+        LocalDateTime now = LocalDateTime.now();
+        long durationMs = elapsedMs(execution.getStartTime());
+        executionLogMapper.update(null, Wrappers.<ExecutionLogEntity>lambdaUpdate()
+                .eq(ExecutionLogEntity::getId, execution.getId())
+                .set(ExecutionLogEntity::getStatus, ExecutionStatus.FAILED)
+                .set(ExecutionLogEntity::getEndTime, now)
+                .set(ExecutionLogEntity::getDurationMs, durationMs)
+                .set(ExecutionLogEntity::getErrorMessage, truncate(errorMessage, ERROR_MESSAGE_MAX_LENGTH))
+                .set(ExecutionLogEntity::getNextRetryTime, nextRetryTime));
+        execution.setStatus(ExecutionStatus.FAILED);
+        execution.setEndTime(now);
+        execution.setDurationMs(durationMs);
+        execution.setErrorMessage(truncate(errorMessage, ERROR_MESSAGE_MAX_LENGTH));
+        execution.setNextRetryTime(nextRetryTime);
+        return get(execution.getId());
+    }
+
+    /**
+     * 还能不能再重试：已重试次数 < 任务配置的最大重试次数。
+     */
+    public boolean canRetry(ExecutionLogEntity execution, TaskEntity task) {
+        int max = task.getRetryMax() == null ? 0 : task.getRetryMax();
+        int done = execution.getRetryCount() == null ? 0 : execution.getRetryCount();
+        return done < max;
+    }
+
+    /**
+     * 到期需要退避重试的记录（next_retry_time 已到）。
+     * <p>这是内存延迟队列的兜底：调度中心重启后，待重试的记录靠这里捞回来。</p>
+     */
+    public List<ExecutionLogEntity> listPendingRetries() {
+        return executionLogMapper.selectList(Wrappers.<ExecutionLogEntity>lambdaQuery()
+                .eq(ExecutionLogEntity::getStatus, ExecutionStatus.FAILED)
+                .isNotNull(ExecutionLogEntity::getNextRetryTime)
+                .le(ExecutionLogEntity::getNextRetryTime, LocalDateTime.now()));
     }
 
     public PageResult<ExecutionLogEntity> page(ExecutionQuery query) {

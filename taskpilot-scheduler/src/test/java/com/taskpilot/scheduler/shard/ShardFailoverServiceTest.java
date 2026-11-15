@@ -72,6 +72,7 @@ class ShardFailoverServiceTest {
         when(taskService.get(1L)).thenReturn(task);
         // 在线列表里没有原执行器（已下线）。
         when(executorService.listOnline()).thenReturn(List.of(target));
+        when(executionService.canRetry(execution, task)).thenReturn(true);
         when(shardAllocatorRegistry.current()).thenReturn(shardAllocator);
         when(shardAllocator.allocate(eq(1L), eq(2), anyList())).thenReturn(plan);
         when(executionService.claimForRetry(execution)).thenReturn(true);
@@ -100,12 +101,14 @@ class ShardFailoverServiceTest {
     @Test
     void failoverSkippedWhenRetryAlreadyClaimed() {
         ExecutionLogEntity execution = failedExecution(1L, 10L);
+        TaskEntity task = task();
         ExecutorEntity target = executor(11L, "127.0.0.1:8082");
         Map<Integer, List<ExecutorEntity>> plan = new LinkedHashMap<>();
         plan.put(0, List.of(target));
 
-        when(taskService.get(1L)).thenReturn(task());
+        when(taskService.get(1L)).thenReturn(task);
         when(executorService.listOnline()).thenReturn(List.of(target));
+        when(executionService.canRetry(execution, task)).thenReturn(true);
         when(shardAllocatorRegistry.current()).thenReturn(shardAllocator);
         when(shardAllocator.allocate(eq(1L), eq(2), anyList())).thenReturn(plan);
         when(executionService.claimForRetry(execution)).thenReturn(false);
