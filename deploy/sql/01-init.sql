@@ -1,4 +1,8 @@
--- TaskPilot 初始化脚本（MySQL 8）
+-- TaskPilot 初始化脚本（MySQL 8）：全新安装只跑本脚本。
+-- 本文件已包含 Week 1~3 的全部表与列：tp_leader、tp_execution_log 的
+-- fencing_token / leader_instance / next_retry_time / uk_execution_key / retry_count 等。
+-- 02-week2-leader.sql 与 03-week3-retry.sql 是给「旧版本数据库」升级用的增量脚本：
+-- 在全新库上再执行它们会报 table already exists / Duplicate column name。
 -- 时区约定：容器/连接/JVM 统一 Asia/Shanghai，时间字段使用 DATETIME(3)。
 
 CREATE DATABASE IF NOT EXISTS taskpilot

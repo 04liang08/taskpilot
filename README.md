@@ -2,7 +2,7 @@
 
 分布式任务调度平台：**调度中心（scheduler）+ 执行器（executor）** 两段式架构。
 
-> 当前状态：第 2 周 Day 3 —— 时间轮 + cron 定时触发 + 领导选举（Redisson 锁 + fencing token）已就绪。
+> 当前状态：第 3 周 Day 5 —— 分片并发、失败转移、指数退避重试、确定性幂等键与端到端验收已就绪；第 3 周评审提出的 P1/P2 缺陷（0.1~1.5）已修复。
 
 ## 1. 它解决什么问题
 
@@ -13,7 +13,7 @@
 | 多实例同时触发，同一任务被执行 N 次 | 领导选举 + 时间轮，集群内只触发一次 |
 | 某台机器挂了，任务就丢了 | 心跳检测 → 分片重分配 → 失败转移 → 重试/死信 |
 | 任务散落在各机器，无法统一管理 | 任务 CRUD + 启停 + 执行历史 + 告警 |
-| 重复投递导致业务重复生效 | `execution_key` 唯一索引 + Redis SETNX，至少一次 + 业务幂等 |
+| 重复投递导致业务重复生效 | `execution_key` 唯一索引（定时触发）+ 业务侧幂等，语义是「至少一次」 |
 
 核心目标不是"又一个 CRUD"，而是把 **只触发一次、失败能转移、重复执行不重复生效** 做透。
 
@@ -69,6 +69,8 @@ docker compose -f deploy/docker-compose.yml up -d mysql redis nacos
 ```
 
 首次启动 MySQL 会自动执行 `deploy/sql/01-init.sql`，创建 `tp_task`、`tp_executor`、`tp_execution_log`、`tp_leader` 四张表。
+
+> `01-init.sql` 已包含 Week 2/3 的全部内容（`tp_leader`、fencing 列、`next_retry_time`）。`02-week2-leader.sql`、`03-week3-retry.sql` 只用于**老库升级**，在全新库上再执行会报重复表 / 重复列。
 
 > 第 2 周 Day 3 起，调度中心需要 Redis 做领导选举；只起 MySQL 的话定时触发不会工作（单机开发可设 `taskpilot.scheduler.election.enabled=false`）。
 
@@ -177,7 +179,7 @@ java -jar taskpilot-scheduler/target/taskpilot-scheduler-1.0.0-SNAPSHOT.jar --se
 ```
 
 - 只有一个实例会成为 leader 并推时间轮，其余是 follower；leader 身份存在 `tp_leader` 表里。
-- leader 崩溃后约 30 秒（锁租约）另一个实例接管，token 递增，旧 leader 的写入会被 fencing 拒绝。
+- leader 被强杀后约 30 秒（Redisson watchdog 的默认锁超时）另一个实例接管，token 递增，旧 leader 的写入会被 fencing 拒绝；正常关闭走 `@PreDestroy` 主动释放锁，其他实例可立刻接管。
 - 不想装 Redis 的单机开发：`taskpilot.scheduler.election.enabled=false`，本实例直接充当 leader。
 
 ### 5.5 集群验收脚本
@@ -196,6 +198,18 @@ powershell -ExecutionPolicy Bypass -File scripts/verify-cluster.ps1 -CronSeconds
 断言全部通过时退出码为 0，可直接接进 CI。
 
 参考耗时：10 秒 cron 观察 35 秒 → 触发 3 次（理论 3 次，双实例若都触发会翻倍）；强杀 leader 后 **26 秒**接管，fencing token 从 1 变 2。
+
+第 3 周 Day 5 的六场景验收另见独立脚本（同样按端口定位进程、日志放 `.tmp/`、退出码 0/1 可接 CI）：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/verify-week3.ps1
+# 本机 MySQL 不在默认 3306 端口时
+powershell -ExecutionPolicy Bypass -File scripts/verify-week3.ps1 -MysqlPort 3307
+```
+
+双 scheduler + 双 executor，覆盖：① 分片并发计时；② 杀执行器后失败转移成功且记录指向新执行器；③ 退避重试时序（5s→10s）；④ 同一计划时间重复触发被幂等去重；⑤ 广播任务每台执行器都执行；⑥ 改 cron 后触发频率不翻倍。实测数字写在 `.tmp/verify-week3/results.json`。
+
+参考实测（本机双 scheduler + 双 executor，两次完整运行）：4 分片各 1 秒 → 串行估算 4000 ms、并发 **1266~1268 ms（3.15~3.16x）**；退避间隔 **5.1s / 10.3s**；杀执行器到失败转移重跑成功 **19~22s**；广播 2 分片 × 2 执行器，每个计划时间 4 条记录；改 cron 后 22 秒内新增 2~3 次（10s 周期理论 2 次，未翻倍）。
 
 相关入口：
 
@@ -264,8 +278,9 @@ docker exec -it taskpilot-mysql mysql -utaskpilot -ptaskpilot \
 重试与幂等：
 
 - **退避重试**：执行失败后按 `retry_interval_seconds × 2^已重试次数` 重试（封顶 5 分钟），次数受任务 `retry_max` 限制；重试状态落 `next_retry_time`，调度中心重启后不丢。
-- **幂等**：定时触发的 `execution_key` 是确定性的 `taskId:计划触发时间:分片号`（如 `3:20261115161500:0`），同一计划时间点的重复触发会被 `uk_execution_key` 挡下；手动触发用 UUID，允许重复。
+- **幂等**：定时触发的 `execution_key` 是确定性的 `taskId:计划触发时间:分片号`（如 `3:20261115161500:0`），同一计划时间点的重复触发会被 `uk_execution_key` 挡下；广播策略下一个分片有多台目标执行器，键追加 `:执行器Id`（**单目标分片的键保持不变**）；手动触发用 UUID，允许重复。
 - 分工：原执行器不可用 → 换机重试（立即）；原执行器还在（处理器抛异常）→ 原地退避重试。
+- **边界（别误解）**：fencing 是定时触发入口的一次预检，不是写库层的全局强制；执行器侧没有按 `executionId` 去重。整体语义是**至少一次 + 业务幂等**，不是"保证不执行两遍"。
 
 执行器注册表：
 
@@ -311,7 +326,7 @@ docker exec -it taskpilot-mysql mysql -utaskpilot -ptaskpilot \
 - [x] Day 2：分片并发执行（独立分片线程池）+ 执行器上下线事件 + 僵尸 RUNNING 记录回收
 - [x] Day 3：失败转移（执行器下线后分片重新分配并重试，复用原记录 + 原子抢占）
 - [x] Day 4：确定性幂等键（`taskId:计划时间:分片号` + 唯一索引兜底）+ 指数退避重试
-- [ ] Day 5：端到端验收 + 文档
+- [x] Day 5：端到端验收（`scripts/verify-week3.ps1`）+ 文档 + 评审缺陷修复（0.1~1.5）
 
 ## 8. 文档索引
 
@@ -341,9 +356,17 @@ docker exec -it taskpilot-mysql mysql -utaskpilot -ptaskpilot \
 | ~~执行器下线后分片不重分配~~ | **已修复**：失败转移把分片换到其他执行器重试（复用原记录，`retry_count+1`） | — |
 | ~~没有退避重试~~ | **已修复**：指数退避（5s → 10s → …），重试状态落 `next_retry_time`，重启不丢 | — |
 | ~~没有幂等闭环~~ | **已修复**：定时触发用确定性键 + `uk_execution_key` 兜底 | — |
-| 失败转移有延迟 | 最坏要等 30 秒心跳超时才判定执行器下线 | Week 3：调小心跳超时 / 执行器主动上报下线 |
+| ~~时间轮跨槽位残留 / 桶非线程安全~~ | **已修复（0.1）**：重排先清旧条目、公开方法加同步；改 cron 后不再频率翻倍 | — |
+| ~~BROADCAST 定时触发被幂等键吞掉~~ | **已修复（0.2）**：多目标分片键追加执行器维度，单目标分片键保持不变 | — |
+| ~~重试同步阻塞单线程调度器~~ | **已修复（0.3）**：dispatch 下沉分片线程池、`@Scheduled` 池 4 线程；池满时放回 `next_retry_time` | — |
+| ~~下线事件监听器无序 / RUNNING 记录丢失~~ | **已修复（1.1）**：`@Order` 保证收尾先于转移、收尾挂 `next_retry_time` 兜底、预算耗尽落终态 | — |
+| ~~failover 后记录仍指向旧执行器~~ | **已修复（1.2）**：claim 的同一条 UPDATE 把 executor 列改指向目标执行器 | — |
+| ~~心跳恢复窗口内误发下线事件~~ | **已修复（1.3）**：逐行条件更新，affected = 1 才发事件 | — |
+| ~~leader 优雅让位失效 / finish 整实体写回~~ | **已修复（1.4）**：关闭时按归属 `forceUnlock()`；`finish` 定向列更新并带状态前置条件 | — |
+| ~~createFailed 标错 triggerType / MANUAL 被转移 / 死配置~~ | **已修复（1.5）**：传入真实 triggerType、MANUAL 不参与转移、删除 `lease-seconds` | — |
+| 失败转移有延迟 | 最坏要等 30 秒心跳超时才判定下线（双实例实测接管 19~22s） | Week 4：执行器主动上报下线 / 调小心跳超时 |
 | 没有死信与告警 | 重试耗尽的失败只有日志和一条 FAILED 记录 | Week 4：死信表 + MQ 告警 |
-| 定时触发是同步的（阻塞 Web 线程） | 长任务会占住请求线程 | Week 3：异步化 + 执行结果回调 |
+| 结果上报仍是同步 HTTP 回包 | 手动触发会同步等待执行结果；定时触发已异步化，但结果仍靠同步回包 | Week 4：MQ / 回调上报结果 |
 | 执行器接口无鉴权 | 仅限内网演示 | Week 4：简单 token |
 | 没有压测数据 | 简历里不能写吞吐/延迟数字 | Week 4：JMeter 实测 |
 

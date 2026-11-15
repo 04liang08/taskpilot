@@ -1,5 +1,8 @@
 -- Week 2 Day 3 增量迁移：leader 状态表 + 执行记录里的 fencing 信息。
--- 已经按 01-init.sql 建过库的环境执行本脚本；全新安装直接用 01-init.sql 即可。
+-- 适用范围：仅 Week 1 时期建的老库（当时的 01-init.sql 还没有 tp_leader / fencing 列）。
+-- 全新安装请只执行当前版本的 01-init.sql —— 它已包含 tp_leader 及
+-- fencing_token / leader_instance 两列；在全新库上再跑本脚本会报
+-- "table already exists" / "Duplicate column name"。
 -- 注意：MySQL 不支持 ALTER TABLE ADD COLUMN IF NOT EXISTS，本脚本只执行一次。
 
 CREATE TABLE IF NOT EXISTS tp_leader (
