@@ -2,8 +2,8 @@
 
 > 状态：第 3 周评审修复（0.1~0.3、1.1~1.5）已完成，`mvn clean verify` 全绿，
 > 双 scheduler + 双 executor 端到端验收两次通过（退出码 0）。
-> 下列条目**不阻塞合并**：由评审方用 `git diff eb64075..HEAD` 逐项复审后，再把
-> `fix/review-round1` 合并回 `main`。Week 3 至此收尾。
+> `fix/review-round1` 已合并回 `main`，Week 3 收尾。下列条目为当时的评审遗留，
+> **不阻塞合并**，留作 Week 4 及后续处理。
 
 ## A. Week 4 起点
 
@@ -47,6 +47,6 @@
 
 ## C. 本地环境 / 卫生（非代码，不影响交付）
 
-- `.tmp/chrome-profile/`、`.tmp/node_modules/`、`.tmp/mysql-data/` 为本地临时产物（已 gitignore）；清理时授权确认超时未完成，可手动删除。`.tmp/verify-week3/` 保留作为验收日志。
-- 本机 3306 被 WorkBuddy 自身的 HTTP 服务占用、MySQL81 服务无法启动；E2E 用 `.tmp/mysql-data` 起了 3307 隔离实例，通过 `-MysqlPort 3307` 传参。正常环境（MySQL 在 3306）直接跑默认参数即可。
+- `.tmp/` 下的 playwright 截图/脚本、浏览器 profile、node_modules 与临时 MySQL 数据目录均已清理；`.tmp/verify-cluster/`、`.tmp/verify-week3/`、`.tmp/verify-week3-console.log` 保留作为验收日志（均已 gitignore）。
+- 本机 3306 被 WorkBuddy 自身的 HTTP 服务占用、MySQL81 服务无法启动；E2E 曾用 `.tmp/mysql-data` 起 3307 隔离实例，通过 `-MysqlPort 3307` 传参，验收结束后已停止并删除。正常环境（MySQL 在 3306）直接跑默认参数即可。
 - `.workbuddy/` 是本地工作区数据，未纳入版本控制。
