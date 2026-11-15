@@ -6,6 +6,7 @@ import com.taskpilot.scheduler.entity.ExecutorEntity;
 import com.taskpilot.scheduler.executor.ExecutorStatusChangedEvent;
 import com.taskpilot.scheduler.mapper.ExecutorMapper;
 import com.baomidou.mybatisplus.core.MybatisConfiguration;
+import com.baomidou.mybatisplus.core.conditions.Wrapper;
 import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
 import org.apache.ibatis.builder.MapperBuilderAssistant;
 import org.junit.jupiter.api.BeforeEach;
@@ -23,6 +24,8 @@ import java.util.List;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -92,16 +95,49 @@ class ExecutorServiceTest {
     }
 
     @Test
-    void markStaleOfflineReturnsUpdatedRows() {
+    void markStaleOfflinePublishesEventOnlyForRowsActuallyUpdated() {
         ExecutorEntity stale = onlineExecutor(3L);
         when(executorMapper.selectList(any())).thenReturn(List.of(stale));
-        when(executorMapper.update(isNull(), any())).thenReturn(3);
+        when(executorMapper.update(isNull(), any())).thenReturn(1);
 
         int count = executorService.markStaleOffline(30);
 
-        assertThat(count).isEqualTo(3);
-        // 下线要发事件：Day 3 的分片重分配靠它触发。
+        assertThat(count).isEqualTo(1);
+        // 下线事件驱动收尾与失败转移，必须只发给真正被改成 OFFLINE 的执行器。
         verify(eventPublisher).publishEvent(any(ExecutorStatusChangedEvent.class));
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Wrapper<ExecutorEntity>> captor = ArgumentCaptor.forClass(Wrapper.class);
+        verify(executorMapper).update(isNull(), captor.capture());
+        // 逐行条件更新：id + 仍在线 + 心跳仍超时，缺一不可。
+        assertThat(captor.getValue().getSqlSegment())
+                .contains("id", "status", "last_heartbeat_time");
+    }
+
+    @Test
+    void markStaleOfflineSkipsEventWhenHeartbeatRecoveredBeforeUpdate() {
+        // 查询后执行器刚好心跳恢复：条件更新不命中，绝不能误发下线事件，
+        // 否则会误收尾它的 RUNNING 记录并误触发一次失败转移。
+        ExecutorEntity stale = onlineExecutor(3L);
+        when(executorMapper.selectList(any())).thenReturn(List.of(stale));
+        when(executorMapper.update(isNull(), any())).thenReturn(0);
+
+        int count = executorService.markStaleOffline(30);
+
+        assertThat(count).isZero();
+        verify(eventPublisher, never()).publishEvent(any());
+    }
+
+    @Test
+    void markStaleOfflineCountsOnlySuccessfullyUpdatedRows() {
+        // 多个候选中只有部分真正下线，返回数必须与发出的事件数一致。
+        when(executorMapper.selectList(any()))
+                .thenReturn(List.of(onlineExecutor(3L), onlineExecutor(4L), onlineExecutor(5L)));
+        when(executorMapper.update(isNull(), any())).thenReturn(1, 0, 1);
+
+        int count = executorService.markStaleOffline(30);
+
+        assertThat(count).isEqualTo(2);
+        verify(eventPublisher, times(2)).publishEvent(any(ExecutorStatusChangedEvent.class));
     }
 
     private ExecutorEntity onlineExecutor(Long id) {

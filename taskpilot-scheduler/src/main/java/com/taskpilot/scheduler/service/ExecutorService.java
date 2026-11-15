@@ -13,6 +13,8 @@ import com.taskpilot.scheduler.dto.ExecutorRegisterRequest;
 import com.taskpilot.scheduler.entity.ExecutorEntity;
 import com.taskpilot.scheduler.executor.ExecutorStatusChangedEvent;
 import com.taskpilot.scheduler.mapper.ExecutorMapper;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
@@ -28,6 +30,7 @@ import java.util.List;
 @Service
 public class ExecutorService {
 
+    private static final Logger log = LoggerFactory.getLogger(ExecutorService.class);
     private static final String DEFAULT_GROUP = "DEFAULT";
 
     private final ExecutorMapper executorMapper;
@@ -145,26 +148,37 @@ public class ExecutorService {
 
     /**
      * 将最后心跳早于 deadline 的在线执行器标记为 OFFLINE，并发布下线事件。
+     * <p>逐行条件更新，只有 affected rows = 1 才发事件：查询和更新之间执行器可能
+     * 刚好心跳恢复（last_heartbeat_time 被刷新），这时条件不再命中，UPDATE 返回 0。
+     * 如果按查出来的名单无脑发事件，会把刚恢复的执行器上的 RUNNING 记录误收尾，
+     * 还会误触发一次失败转移。</p>
      *
-     * @return 本次下线的执行器数量
+     * @return 本次真正下线的执行器数量
      */
     public int markStaleOffline(long timeoutSeconds) {
         LocalDateTime deadline = LocalDateTime.now().minusSeconds(timeoutSeconds);
-        // 先查出会下线的执行器：一条 UPDATE 拿不到具体是哪几个，事件需要具体信息。
+        // 先查出候选：一条 UPDATE 拿不到具体是哪几个，事件需要具体信息。
         List<ExecutorEntity> stale = executorMapper.selectList(Wrappers.<ExecutorEntity>lambdaQuery()
                 .eq(ExecutorEntity::getStatus, ExecutorStatus.ONLINE)
                 .lt(ExecutorEntity::getLastHeartbeatTime, deadline));
-        if (stale.isEmpty()) {
-            return 0;
-        }
-        int updated = executorMapper.update(null, Wrappers.<ExecutorEntity>lambdaUpdate()
-                .eq(ExecutorEntity::getStatus, ExecutorStatus.ONLINE)
-                .lt(ExecutorEntity::getLastHeartbeatTime, deadline)
-                .set(ExecutorEntity::getStatus, ExecutorStatus.OFFLINE));
+        int offline = 0;
         for (ExecutorEntity executor : stale) {
+            // 把"仍在线 + 心跳仍超时"作为更新条件：任一条不满足就说明状态已经变了。
+            int updated = executorMapper.update(null, Wrappers.<ExecutorEntity>lambdaUpdate()
+                    .eq(ExecutorEntity::getId, executor.getId())
+                    .eq(ExecutorEntity::getStatus, ExecutorStatus.ONLINE)
+                    .lt(ExecutorEntity::getLastHeartbeatTime, deadline)
+                    .set(ExecutorEntity::getStatus, ExecutorStatus.OFFLINE));
+            if (updated != 1) {
+                log.info("skip offline event, executor recovered or state changed: id={}, address={}",
+                        executor.getId(), executor.getAddress());
+                continue;
+            }
+            offline++;
+            executor.setStatus(ExecutorStatus.OFFLINE);
             publishStatusChanged(executor, false);
         }
-        return updated;
+        return offline;
     }
 
     private void publishStatusChanged(ExecutorEntity executor, boolean online) {
