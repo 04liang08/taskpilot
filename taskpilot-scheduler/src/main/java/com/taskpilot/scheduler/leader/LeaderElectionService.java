@@ -43,6 +43,8 @@ public class LeaderElectionService {
     private final AtomicReference<Long> leaderToken = new AtomicReference<>(null);
     private volatile boolean leader = false;
     private volatile RLock lock;
+    /** 抢到锁的线程 id：关闭发生在别的线程上，需要用它复核锁的归属。 */
+    private volatile long lockOwnerThreadId = -1;
     private ScheduledExecutorService campaignExecutor;
 
     public LeaderElectionService(RedissonClient redissonClient,
@@ -130,6 +132,7 @@ public class LeaderElectionService {
 
         leader = true;
         leaderToken.set(token);
+        lockOwnerThreadId = Thread.currentThread().getId();
         log.info("became leader: instanceId={}, fencingToken={}", instanceId, token);
         publishChanged(true, token);
         return true;
@@ -159,6 +162,7 @@ public class LeaderElectionService {
     private void becomeFollower() {
         leader = false;
         leaderToken.set(null);
+        lockOwnerThreadId = -1;
         publishChanged(false, null);
     }
 
@@ -166,13 +170,31 @@ public class LeaderElectionService {
         eventPublisher.publishEvent(new LeaderChangedEvent(isLeader, token));
     }
 
+    /**
+     * 释放锁。
+     * <p>正常关闭发生在 Spring 关闭线程上，而锁是 campaign 线程抢的。Redisson 按
+     * "客户端 + 线程"记录锁归属，{@code isHeldByCurrentThread()} 在关闭线程上恒为 false，
+     * 只调 {@code unlock()} 永远放不掉锁，别的实例要等 watchdog 超时（约 30 秒）才能接管，
+     * 和"优雅让位"完全相反。</p>
+     * <p>所以先用 {@code isHeldByThread(lockOwnerThreadId)} 复核这把锁确实还属于本进程的
+     * campaign 线程，再 {@code forceUnlock()} 强制释放。复核不通过就什么都不做——
+     * 那说明锁已经被别的实例拿走，贸然 forceUnlock 会放出双 leader。</p>
+     */
     private void safeUnlock() {
         try {
-            if (lock != null && lock.isHeldByCurrentThread()) {
+            if (lock == null) {
+                return;
+            }
+            if (lock.isHeldByCurrentThread()) {
                 lock.unlock();
+            } else if (lockOwnerThreadId > 0 && lock.isHeldByThread(lockOwnerThreadId)) {
+                lock.forceUnlock();
+                log.info("leader lock force-unlocked on shutdown: instanceId={}", instanceId);
             }
         } catch (Exception e) {
             log.debug("unlock failed: {}", e.getMessage());
+        } finally {
+            lockOwnerThreadId = -1;
         }
     }
 
@@ -201,5 +223,7 @@ public class LeaderElectionService {
             log.info("release leader lock: instanceId={}", instanceId);
         }
         safeUnlock();
+        leader = false;
+        leaderToken.set(null);
     }
 }

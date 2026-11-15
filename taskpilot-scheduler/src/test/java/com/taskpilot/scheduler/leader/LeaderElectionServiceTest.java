@@ -112,4 +112,52 @@ class LeaderElectionServiceTest {
         verifyNoInteractions(redissonClient);
         verify(leaderStateService, never()).claim(anyString(), anyLong());
     }
+
+    @Test
+    void shutdownForceUnlocksLockHeldByCampaignThread() {
+        // 抢锁在 campaign 线程，Spring 关闭线程上 isHeldByCurrentThread() 恒 false。
+        // 必须强制释放，否则别的实例要等 watchdog 超时（约 30s）才能接管。
+        becomeLeader();
+        when(lock.isHeldByCurrentThread()).thenReturn(false);
+        when(lock.isHeldByThread(anyLong())).thenReturn(true);
+
+        service.shutdown();
+
+        verify(lock).forceUnlock();
+        assertThat(service.isLeader()).isFalse();
+    }
+
+    @Test
+    void shutdownDoesNotReleaseLockOwnedByAnotherInstance() {
+        // 锁已经被别的实例拿走：不能 forceUnlock，否则会放出双 leader。
+        becomeLeader();
+        when(lock.isHeldByCurrentThread()).thenReturn(false);
+        when(lock.isHeldByThread(anyLong())).thenReturn(false);
+
+        service.shutdown();
+
+        verify(lock, never()).forceUnlock();
+        verify(lock, never()).unlock();
+    }
+
+    @Test
+    void shutdownUsesNormalUnlockWhenCalledOnTheLockOwnerThread() {
+        becomeLeader();
+        when(lock.isHeldByCurrentThread()).thenReturn(true);
+
+        service.shutdown();
+
+        verify(lock).unlock();
+        verify(lock, never()).forceUnlock();
+    }
+
+    private void becomeLeader() {
+        when(redissonClient.getLock(anyString())).thenReturn(lock);
+        when(lock.tryLock()).thenReturn(true);
+        when(redissonClient.getAtomicLong(anyString())).thenReturn(atomicLong);
+        when(atomicLong.incrementAndGet()).thenReturn(5L);
+        when(leaderStateService.currentToken()).thenReturn(3L);
+        when(leaderStateService.claim(anyString(), anyLong())).thenReturn(true);
+        assertThat(service.campaign()).isTrue();
+    }
 }

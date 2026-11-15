@@ -16,6 +16,8 @@ import com.taskpilot.scheduler.entity.ExecutorEntity;
 import com.taskpilot.scheduler.entity.TaskEntity;
 import com.taskpilot.scheduler.leader.LeaderContext;
 import com.taskpilot.scheduler.mapper.ExecutionLogMapper;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 
@@ -30,6 +32,8 @@ import java.util.UUID;
  */
 @Service
 public class ExecutionService {
+
+    private static final Logger log = LoggerFactory.getLogger(ExecutionService.class);
 
     private static final int RESULT_SUMMARY_MAX_LENGTH = 1024;
     private static final int ERROR_MESSAGE_MAX_LENGTH = 4000;
@@ -351,12 +355,29 @@ public class ExecutionService {
                                       long durationMs,
                                       String errorMessage,
                                       String resultSummary) {
+        LocalDateTime endTime = LocalDateTime.now();
+        String error = truncate(errorMessage, ERROR_MESSAGE_MAX_LENGTH);
+        String summary = truncate(resultSummary, RESULT_SUMMARY_MAX_LENGTH);
+        // 只更新终态列：整实体 updateById 会把并发路径刚写进去的字段用旧值覆盖回去
+        // （失败转移的 executor 列、claim 的 retry_count、收尾/退避的 next_retry_time）。
+        // 带 status=RUNNING 前置条件：已经被下线收尾或别的路径改成终态的记录不再二次覆写。
+        int updated = executionLogMapper.update(null, Wrappers.<ExecutionLogEntity>lambdaUpdate()
+                .eq(ExecutionLogEntity::getId, execution.getId())
+                .eq(ExecutionLogEntity::getStatus, ExecutionStatus.RUNNING)
+                .set(ExecutionLogEntity::getStatus, status)
+                .set(ExecutionLogEntity::getEndTime, endTime)
+                .set(ExecutionLogEntity::getDurationMs, durationMs)
+                .set(ExecutionLogEntity::getErrorMessage, error)
+                .set(ExecutionLogEntity::getResultSummary, summary));
+        if (updated == 0) {
+            log.info("execution already finalized, skip terminal overwrite: executionId={}", execution.getId());
+        }
+        // 同步内存实体：调用方（结果日志、失败事件）要读终态。
         execution.setStatus(status);
-        execution.setEndTime(LocalDateTime.now());
+        execution.setEndTime(endTime);
         execution.setDurationMs(durationMs);
-        execution.setErrorMessage(truncate(errorMessage, ERROR_MESSAGE_MAX_LENGTH));
-        execution.setResultSummary(truncate(resultSummary, RESULT_SUMMARY_MAX_LENGTH));
-        executionLogMapper.updateById(execution);
+        execution.setErrorMessage(error);
+        execution.setResultSummary(summary);
         return get(execution.getId());
     }
 

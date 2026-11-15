@@ -101,7 +101,9 @@ class ExecutionServiceTest {
         assertThat(result.getDurationMs()).isEqualTo(12);
         assertThat(result.getResultSummary()).isEqualTo("demoHandler done");
         assertThat(result.getEndTime()).isNotNull();
-        verify(executionLogMapper).updateById(execution);
+        // 终态用定向列更新，不再整实体写回，避免覆盖并发路径刚改的字段。
+        verify(executionLogMapper, never()).updateById(any(ExecutionLogEntity.class));
+        verify(executionLogMapper).update(isNull(), any());
     }
 
     @Test
@@ -234,6 +236,48 @@ class ExecutionServiceTest {
     }
 
     @Test
+    void finishUpdatesOnlyTerminalColumnsAndGuardsOnRunningStatus() {
+        // 整实体 updateById 会把并发路径刚写进去的 executor / retry_count / next_retry_time
+        // 用旧值覆盖回去；终态只能改这几列。
+        ExecutionLogEntity execution = runningExecution(112L);
+        execution.setExecutorId(11L);
+        execution.setExecutorAddress("127.0.0.1:8082");
+        execution.setRetryCount(1);
+        stubUpdateAndReload(execution);
+
+        executionService.markFailed(execution, "调用执行器失败: Connection refused");
+
+        LambdaUpdateWrapper<ExecutionLogEntity> wrapper = captureUpdate();
+        assertThat(wrapper.getSqlSet()).contains("status", "end_time", "duration_ms",
+                "error_message", "result_summary");
+        assertThat(wrapper.getSqlSet()).doesNotContain("executor_id", "executor_address",
+                "retry_count", "next_retry_time");
+        assertThat(wrapper.getSqlSegment()).contains("id", "status");
+        verify(executionLogMapper, never()).updateById(any(ExecutionLogEntity.class));
+    }
+
+    @Test
+    void finishDoesNotOverwriteRecordAlreadyFinalizedByAnotherPath() {
+        ExecutionLogEntity execution = runningExecution(113L);
+        execution.setExecutorId(11L);
+        execution.setRetryCount(1);
+        when(executionLogMapper.update(isNull(), any())).thenReturn(0);
+        ExecutionLogEntity persisted = runningExecution(113L);
+        persisted.setStatus(ExecutionStatus.FAILED);
+        persisted.setExecutorId(11L);
+        persisted.setExecutorAddress("127.0.0.1:8082");
+        persisted.setRetryCount(2);
+        when(executionLogMapper.selectById(113L)).thenReturn(persisted);
+
+        ExecutionLogEntity result = executionService.markFailed(execution, "调用执行器失败");
+
+        assertThat(result.getStatus()).isEqualTo(ExecutionStatus.FAILED);
+        assertThat(result.getExecutorId()).isEqualTo(11L);
+        assertThat(result.getRetryCount()).isEqualTo(2);
+        verify(executionLogMapper, never()).updateById(any(ExecutionLogEntity.class));
+    }
+
+    @Test
     void claimForRetryOnFailoverRebindsPersistedExecutor() {
         // 失败转移：抢占重试的同一条 UPDATE 把记录改指向目标执行器，
         // 转移成功后落终态不会再写回那台已经挂掉的旧执行器。
@@ -274,7 +318,7 @@ class ExecutionServiceTest {
     }
 
     private void stubUpdateAndReload(ExecutionLogEntity execution) {
-        when(executionLogMapper.updateById(execution)).thenReturn(1);
+        when(executionLogMapper.update(isNull(), any())).thenReturn(1);
         when(executionLogMapper.selectById(execution.getId())).thenReturn(execution);
     }
 
