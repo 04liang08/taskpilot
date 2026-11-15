@@ -23,6 +23,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.web.client.ResourceAccessException;
 
@@ -76,6 +77,9 @@ class TriggerServiceTest {
     @Mock
     private ThreadPoolTaskExecutor triggerExecutor;
 
+    @Mock
+    private ApplicationEventPublisher eventPublisher;
+
     private ThreadPoolTaskExecutor shardExecutor;
     private TriggerService triggerService;
 
@@ -88,7 +92,7 @@ class TriggerServiceTest {
         shardExecutor.setQueueCapacity(64);
         shardExecutor.initialize();
         triggerService = new TriggerService(taskService, executorService, executionService, executorClient,
-                leaderStateService, shardAllocatorRegistry, triggerExecutor, shardExecutor);
+                leaderStateService, shardAllocatorRegistry, triggerExecutor, shardExecutor, eventPublisher);
     }
 
     @AfterEach

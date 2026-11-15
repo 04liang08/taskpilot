@@ -24,4 +24,23 @@ public interface ExecutionLogMapper extends BaseMapper<ExecutionLogEntity> {
                AND TIMESTAMPDIFF(SECOND, e.start_time, NOW(3)) > t.timeout_seconds + #{graceSeconds}
             """)
     int recoverStaleRunning(@Param("graceSeconds") int graceSeconds);
+
+    /**
+     * 原子抢占一次重试：只有把记录从 FAILED/TIMEOUT 改成 RUNNING 成功的那一方才有资格执行。
+     * <p>用一条 UPDATE 做乐观抢占：多实例同时看到同一条失败记录时，也只会有一方真正重试，
+     * 避免同一个分片被执行两遍（副作用重复）。</p>
+     *
+     * @return 影响行数：1 表示抢占成功，0 表示已被别人抢走或状态不对
+     */
+    @Update("""
+            UPDATE tp_execution_log
+               SET status = 'RUNNING',
+                   retry_count = retry_count + 1,
+                   start_time = NOW(3),
+                   end_time = NULL,
+                   error_message = NULL
+             WHERE id = #{id}
+               AND status IN ('FAILED', 'TIMEOUT')
+            """)
+    int claimForRetry(@Param("id") Long id);
 }

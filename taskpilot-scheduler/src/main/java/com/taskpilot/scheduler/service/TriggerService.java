@@ -14,9 +14,11 @@ import com.taskpilot.scheduler.entity.TaskEntity;
 import com.taskpilot.scheduler.leader.LeaderContext;
 import com.taskpilot.scheduler.leader.LeaderStateService;
 import com.taskpilot.scheduler.shard.ShardAllocatorRegistry;
+import com.taskpilot.scheduler.shard.ShardFailedEvent;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.core.task.TaskRejectedException;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.stereotype.Service;
@@ -50,6 +52,7 @@ public class TriggerService {
     private final ShardAllocatorRegistry shardAllocatorRegistry;
     private final ThreadPoolTaskExecutor triggerExecutor;
     private final ThreadPoolTaskExecutor shardExecutor;
+    private final ApplicationEventPublisher eventPublisher;
     private final AtomicInteger roundRobin = new AtomicInteger();
     /**
      * 同一任务不允许并发执行。手动触发与定时触发共用这把锁。
@@ -64,7 +67,8 @@ public class TriggerService {
                           LeaderStateService leaderStateService,
                           ShardAllocatorRegistry shardAllocatorRegistry,
                           @Qualifier("triggerExecutor") ThreadPoolTaskExecutor triggerExecutor,
-                          @Qualifier("shardExecutor") ThreadPoolTaskExecutor shardExecutor) {
+                          @Qualifier("shardExecutor") ThreadPoolTaskExecutor shardExecutor,
+                          ApplicationEventPublisher eventPublisher) {
         this.taskService = taskService;
         this.executorService = executorService;
         this.executionService = executionService;
@@ -73,6 +77,7 @@ public class TriggerService {
         this.shardAllocatorRegistry = shardAllocatorRegistry;
         this.triggerExecutor = triggerExecutor;
         this.shardExecutor = shardExecutor;
+        this.eventPublisher = eventPublisher;
     }
 
     /**
@@ -204,11 +209,12 @@ public class TriggerService {
 
     /**
      * 调用执行器并落终态。分片与单分片共用这条路径，失败只影响当前分片。
+     * <p>失败转移（换执行器重试）也复用这个方法。</p>
      */
-    private ExecutionLogEntity dispatch(ExecutionLogEntity execution,
-                                        TaskEntity task,
-                                        ExecutorEntity executor,
-                                        TriggerType triggerType) {
+    public ExecutionLogEntity dispatch(ExecutionLogEntity execution,
+                                       TaskEntity task,
+                                       ExecutorEntity executor,
+                                       TriggerType triggerType) {
         ExecuteRequest request = new ExecuteRequest(
                 execution.getId(),
                 task.getId(),
@@ -231,22 +237,38 @@ public class TriggerService {
                 ExecutionLogEntity finished = executionService.markTimeout(execution, "调用执行器超时: " + rootMessage(e));
                 log.warn("trigger timeout: taskId={}, executionId={}, executor={}, reason={}",
                         task.getId(), execution.getId(), executor.getAddress(), rootMessage(e));
+                publishShardFailed(finished);
                 return finished;
             }
             ExecutionLogEntity finished = executionService.markFailed(execution, "调用执行器失败: " + rootMessage(e));
             log.warn("trigger failed: taskId={}, executionId={}, executor={}, reason={}",
                     task.getId(), execution.getId(), executor.getAddress(), rootMessage(e));
+            publishShardFailed(finished);
             return finished;
         } catch (RestClientException e) {
             ExecutionLogEntity finished = executionService.markFailed(execution, "调用执行器失败: " + rootMessage(e));
             log.warn("trigger failed: taskId={}, executionId={}, executor={}, reason={}",
                     task.getId(), execution.getId(), executor.getAddress(), rootMessage(e));
+            publishShardFailed(finished);
             return finished;
         } catch (Exception e) {
             ExecutionLogEntity finished = executionService.markFailed(execution, "触发异常: " + rootMessage(e));
             log.error("trigger error: taskId={}, executionId={}", task.getId(), execution.getId(), e);
+            publishShardFailed(finished);
             return finished;
         }
+    }
+
+    /**
+     * 发布分片失败事件，交给失败转移逻辑判断要不要换执行器重试。
+     * <p>只有自动触发（cron）才做失败转移：手动触发失败就是失败，由用户决定要不要重来。</p>
+     */
+    private void publishShardFailed(ExecutionLogEntity execution) {
+        if (execution == null || execution.getTriggerType() != TriggerType.CRON) {
+            return;
+        }
+        eventPublisher.publishEvent(
+                new ShardFailedEvent(execution.getId(), execution.getTaskId(), execution.getExecutorId()));
     }
 
     private boolean isTimeout(Throwable throwable) {

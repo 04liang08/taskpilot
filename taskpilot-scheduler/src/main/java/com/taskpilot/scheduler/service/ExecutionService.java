@@ -19,6 +19,7 @@ import org.springframework.stereotype.Service;
 
 import java.time.Duration;
 import java.time.LocalDateTime;
+import java.util.List;
 import java.util.UUID;
 
 /**
@@ -141,6 +142,37 @@ public class ExecutionService {
                 .set(ExecutionLogEntity::getStatus, ExecutionStatus.FAILED)
                 .set(ExecutionLogEntity::getEndTime, now)
                 .set(ExecutionLogEntity::getErrorMessage, reason));
+    }
+
+    /**
+     * 抢占一次重试：原子地把记录从 FAILED/TIMEOUT 改成 RUNNING。
+     * <p>只有抢到的一方才应该真正重试，避免同一个分片被执行两遍。</p>
+     *
+     * @return true 表示抢占成功
+     */
+    public boolean claimForRetry(ExecutionLogEntity execution) {
+        int updated = executionLogMapper.claimForRetry(execution.getId());
+        if (updated == 0) {
+            return false;
+        }
+        // 同步内存状态：后面的 updateById 会把整个实体写回去，不能用旧值覆盖 retry_count。
+        execution.setStatus(ExecutionStatus.RUNNING);
+        execution.setRetryCount(execution.getRetryCount() == null ? 1 : execution.getRetryCount() + 1);
+        execution.setStartTime(LocalDateTime.now());
+        execution.setEndTime(null);
+        execution.setErrorMessage(null);
+        return true;
+    }
+
+    /**
+     * 某个执行器上还没结束的执行记录（RUNNING / FAILED / TIMEOUT）。
+     * <p>执行器下线时用它找出需要转移的分片。</p>
+     */
+    public List<ExecutionLogEntity> listUnfinishedOfExecutor(Long executorId) {
+        return executionLogMapper.selectList(Wrappers.<ExecutionLogEntity>lambdaQuery()
+                .eq(ExecutionLogEntity::getExecutorId, executorId)
+                .in(ExecutionLogEntity::getStatus,
+                        ExecutionStatus.RUNNING, ExecutionStatus.FAILED, ExecutionStatus.TIMEOUT));
     }
 
     public PageResult<ExecutionLogEntity> page(ExecutionQuery query) {
