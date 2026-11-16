@@ -322,10 +322,12 @@ public class ExecutionService {
      * 到期需要退避重试的记录（next_retry_time 已到）。
      * <p>这是内存延迟队列的兜底：调度中心重启后，待重试的记录靠这里捞回来。</p>
      * <p>只捞定时触发的记录：手动触发失败就是失败，由用户决定要不要重来。</p>
+     * <p>TIMEOUT 也要捞：结果消息丢失时，僵尸回收把记录标成 TIMEOUT 并挂了重试时间，
+     * 靠这里接手重试。</p>
      */
     public List<ExecutionLogEntity> listPendingRetries() {
         return executionLogMapper.selectList(Wrappers.<ExecutionLogEntity>lambdaQuery()
-                .eq(ExecutionLogEntity::getStatus, ExecutionStatus.FAILED)
+                .in(ExecutionLogEntity::getStatus, ExecutionStatus.FAILED, ExecutionStatus.TIMEOUT)
                 .eq(ExecutionLogEntity::getTriggerType, TriggerType.CRON)
                 .isNotNull(ExecutionLogEntity::getNextRetryTime)
                 .le(ExecutionLogEntity::getNextRetryTime, LocalDateTime.now()));

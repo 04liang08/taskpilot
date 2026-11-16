@@ -8,17 +8,21 @@ import org.apache.ibatis.annotations.Update;
 public interface ExecutionLogMapper extends BaseMapper<ExecutionLogEntity> {
 
     /**
-     * 回收僵尸 RUNNING 记录。
-     * <p>调度中心在执行途中崩溃/被杀时，记录会永远停在 RUNNING（概览的"运行中"一直不降）。
-     * 判据用任务自己的超时时间做基准：超过 task.timeout_seconds + graceSeconds 才算僵尸，
-     * 避免把正在跑的长任务误判掉。</p>
+     * 回收"结果没回来"的 RUNNING 记录。
+     * <p>第 4 周起执行结果是异步回传的：调度中心只拿到 ACK，真正的结果经 RabbitMQ 回来。
+     * 如果结果消息丢了（broker 挂了、执行器崩了），记录就会一直停在 RUNNING，
+     * 概览的"运行中"一直不降。</p>
+     * <p>这里按"任务超时时间 + 宽限"判僵尸，标成 <b>TIMEOUT</b>（不是 FAILED：
+     * 任务多半是跑太久或结果没回来，不是"明确失败"），并给定时触发的记录挂上
+     * next_retry_time，让退避扫描 / 失败转移接手。这是结果丢失的最后一道防线。</p>
      */
     @Update("""
             UPDATE tp_execution_log e
                JOIN tp_task t ON e.task_id = t.id
-               SET e.status = 'FAILED',
+               SET e.status = 'TIMEOUT',
                    e.end_time = NOW(3),
-                   e.error_message = '执行记录超时未回收（调度中心可能已重启）'
+                   e.next_retry_time = CASE WHEN e.trigger_type = 'CRON' THEN NOW(3) ELSE NULL END,
+                   e.error_message = '执行结果未在超时时间内回传（结果消息可能丢失，调度中心也可能已重启）'
              WHERE e.status = 'RUNNING'
                AND t.deleted = 0
                AND TIMESTAMPDIFF(SECOND, e.start_time, NOW(3)) > t.timeout_seconds + #{graceSeconds}

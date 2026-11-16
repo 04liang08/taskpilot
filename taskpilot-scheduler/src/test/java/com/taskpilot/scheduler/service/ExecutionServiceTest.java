@@ -250,6 +250,23 @@ class ExecutionServiceTest {
     }
 
     @Test
+    void listPendingRetriesAlsoPicksTimeoutRecords() {
+        // 结果消息丢失时僵尸回收把记录标成 TIMEOUT 并挂了重试时间，
+        // 兜底扫描必须能把它捞回来重试，否则这条记录就永远没人管了。
+        when(executionLogMapper.selectList(any())).thenReturn(List.of());
+
+        executionService.listPendingRetries();
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<LambdaQueryWrapper<ExecutionLogEntity>> captor =
+                ArgumentCaptor.forClass(LambdaQueryWrapper.class);
+        verify(executionLogMapper).selectList(captor.capture());
+        assertThat(captor.getValue().getSqlSegment()).contains("status", "trigger_type", "next_retry_time");
+        assertThat(captor.getValue().getParamNameValuePairs().values())
+                .contains(ExecutionStatus.TIMEOUT, ExecutionStatus.FAILED);
+    }
+
+    @Test
     void finishUpdatesOnlyTerminalColumnsAndGuardsOnRunningStatus() {
         // 整实体 updateById 会把并发路径刚写进去的 executor / retry_count / next_retry_time
         // 用旧值覆盖回去；终态只能改这几列。
