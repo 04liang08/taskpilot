@@ -71,6 +71,12 @@ management:
       show-details: always
 
 taskpilot:
+  auth:
+    # 双向共享静态 token：调度中心 -> 执行器（/api/v1/executor/**）、
+    # 执行器 -> 调度中心（POST /api/v1/executors/register 与 /heartbeat）都要带
+    # X-TaskPilot-Token 头。管理 API（任务 CRUD / 执行记录 / 仪表盘）保持开放。
+    # 这里的默认值只用于本机开发，生产环境必须用 TASKPILOT_AUTH_TOKEN 覆盖！
+    token: ${TASKPILOT_AUTH_TOKEN:taskpilot-dev-token}
   execution:
     # 僵尸 RUNNING 记录回收：任务超时时间 + 宽限 秒
     stale-grace-seconds: 60

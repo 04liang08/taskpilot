@@ -1,5 +1,7 @@
 package com.taskpilot.scheduler.client;
 
+import com.taskpilot.common.auth.AuthProperties;
+import com.taskpilot.common.auth.AuthToken;
 import com.taskpilot.common.dto.ExecuteAck;
 import com.taskpilot.common.dto.ExecuteRequest;
 import com.taskpilot.scheduler.config.ExecutorDispatchProperties;
@@ -11,16 +13,18 @@ import java.net.URI;
 
 /**
  * 按注册地址直连执行器。
- * <p>第 4 周起这里只做"派发"：执行接口立即回 ACK（受理与否），
- * 真正的执行结果由执行器经 RabbitMQ 异步回传。
+ * <p>第 4 周起执行接口只回 ACK（受理与否），真正的执行结果由执行器经 RabbitMQ 异步回传。
  * 所以读超时按"ACK 是快操作"来配（默认 5 秒），不再跟着任务超时时间走。</p>
+ * <p>调用内部接口要带共享 token：调度中心与执行器互相证明身份（ADR-020）。</p>
  */
 public class ExecutorClient {
 
     private final ExecutorDispatchProperties properties;
+    private final String token;
 
-    public ExecutorClient(ExecutorDispatchProperties properties) {
+    public ExecutorClient(ExecutorDispatchProperties properties, AuthProperties authProperties) {
         this.properties = properties;
+        this.token = authProperties.getToken();
     }
 
     /**
@@ -35,6 +39,7 @@ public class ExecutorClient {
 
         RestClient client = RestClient.builder()
                 .requestFactory(requestFactory)
+                .defaultHeader(AuthToken.HEADER, token)
                 .build();
 
         ExecuteAck ack = client.post()

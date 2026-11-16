@@ -133,8 +133,8 @@ curl http://localhost:8081/actuator/health
 # 执行器注册表（页面「执行器」Tab 同源）
 curl http://localhost:8080/api/v1/executors
 
-# 执行器已注册的处理器
-curl http://localhost:8081/api/v1/executor/handlers
+# 执行器已注册的处理器（内部接口要带 token）
+curl -H "X-TaskPilot-Token: taskpilot-dev-token" http://localhost:8081/api/v1/executor/handlers
 ```
 
 停掉执行器约 30 秒后，状态会从 `ONLINE` 变为 `OFFLINE`（下次心跳会自动恢复）。
@@ -253,6 +253,28 @@ docker exec -it taskpilot-mysql mysql -utaskpilot -ptaskpilot \
 5. 跑 `scripts/verify-cluster.ps1`：展示"两个实例只触发一次 + 强杀 leader 后 26 秒接管"。
 6. 演示 fencing：把 `tp_leader.fencing_token` 改大，旧 leader 的触发被拒（日志出现 `fencing token 失效`）。
 
+### 5.8 内部接口鉴权（双向共享 token）
+
+第 4 周起，**调度中心 ↔ 执行器**的内部接口需要互相证明身份：
+
+| 方向 | 受保护的接口 |
+|---|---|
+| 调度中心 → 执行器 | `POST /api/v1/executor/execute`、`GET /api/v1/executor/handlers` |
+| 执行器 → 调度中心 | `POST /api/v1/executors/register`、`POST /api/v1/executors/heartbeat` |
+
+请求头固定是 `X-TaskPilot-Token`，token 来自**同一个配置项** `taskpilot.auth.token`
+（环境变量 `TASKPILOT_AUTH_TOKEN`）。两个应用必须配成一样的值，否则症状是执行器注册一直 401。
+
+```bash
+# 默认值只用于本机开发；生产环境必须覆盖
+export TASKPILOT_AUTH_TOKEN="换成你自己的长随机串"
+```
+
+- **管理 API（任务 CRUD / 执行记录 / 仪表盘 / 演示页）与 `/actuator/**` 保持开放**，
+  仅限内网使用——这是刻意的取舍，理由见 [ADR-020](docs/design-decisions.md)。
+- token 比对用常量时间比较（`MessageDigest.isEqual`），避免时序侧信道；
+  **没配 token 时内部接口一律拒绝**（fail-closed），启动日志会打一条 ERROR 说明原因。
+
 ## 6. API 约定
 
 统一前缀 `/api/v1`，统一响应：
@@ -314,7 +336,7 @@ docker exec -it taskpilot-mysql mysql -utaskpilot -ptaskpilot \
 | GET | `/api/v1/executors` | 分页查询：`page`、`size`、`status`、`group` |
 | GET | `/api/v1/executors/{id}` | 执行器详情 |
 
-执行器侧内部接口（端口 8081）：
+执行器侧内部接口（端口 8081，**需要 `X-TaskPilot-Token` 头**）：
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
@@ -397,7 +419,7 @@ docker exec -it taskpilot-mysql mysql -utaskpilot -ptaskpilot \
 | ~~没有死信与告警~~ | **已修复（4.5）**：重试耗尽与毒消息落 `tp_dead_letter`（按 `execution_id` 幂等），并广播到 `taskpilot.alerts` fanout，webhook 可选 | — |
 | ~~结果上报仍是同步 HTTP 回包~~ | **已修复（4.2/4.3）**：执行器只回 ACK，结果经 RabbitMQ 异步回传；手动触发统一返回 `RUNNING`，页面轮询终态 | — |
 | 执行器结果回传依赖 RabbitMQ | broker 不可达时应用仍能启动，但结果回不来，要等僵尸回收（`timeout + grace`）兜底标 TIMEOUT | ADR-019 已如实记录；保持现状 |
-| 执行器接口无鉴权 | 仅限内网演示 | Week 4：简单 token |
+| 执行器接口无鉴权 | — | **已修复（4.7）**：内部接口（调度中心↔执行器）用双向共享静态 token 保护；管理 API 仍开放（仅限内网） | — |
 | 没有压测数据 | 简历里不能写吞吐/延迟数字 | Week 4：JMeter 实测 |
 
 ## 11. Roadmap

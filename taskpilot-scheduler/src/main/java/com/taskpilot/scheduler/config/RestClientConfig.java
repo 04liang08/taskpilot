@@ -1,5 +1,6 @@
 package com.taskpilot.scheduler.config;
 
+import com.taskpilot.common.auth.AuthProperties;
 import com.taskpilot.scheduler.client.ExecutorClient;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
@@ -13,7 +14,7 @@ import org.springframework.context.annotation.Configuration;
 public class RestClientConfig {
 
     @Bean
-    public ExecutorClient executorClient(ExecutorDispatchProperties properties) {
-        return new ExecutorClient(properties);
+    public ExecutorClient executorClient(ExecutorDispatchProperties properties, AuthProperties authProperties) {
+        return new ExecutorClient(properties, authProperties);
     }
 }

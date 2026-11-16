@@ -384,3 +384,59 @@ RabbitMQ 正好卡在中间：单进程、镜像小、有 exchange / queue / DLX
 - 死信表 `tp_dead_letter` 按 `execution_id` 唯一：同一条执行记录只落一行。
   "任务被停用"和"重试预算耗尽"都会落死信——前者是"这条记录再也不会被重试了"，
   后者是"重试用完了"，都需要人看一眼。
+
+## ADR-020：内部接口用双向共享静态 token 鉴权
+
+**背景**：第 4 周 Day 1 之前，调度中心与执行器之间的内部接口是完全开放的：
+
+| 方向 | 接口 | 开放的后果 |
+|---|---|---|
+| 执行器 → 调度中心 | `POST /api/v1/executors/register`、`POST /api/v1/executors/heartbeat` | 任何人都能伪造注册/心跳，把别人的执行器顶成 OFFLINE；下线事件会误触发失败转移 |
+| 调度中心 → 执行器 | `POST /api/v1/executor/execute`、`GET /api/v1/executor/handlers` | 任何人都能让执行器跑任意处理器，也能看到有哪些处理器可调 |
+
+**决策**：用**双向共享静态 token** 保护内部接口。两个应用读同一个配置项
+`taskpilot.auth.token`（环境变量 `TASKPILOT_AUTH_TOKEN`），请求头固定为 `X-TaskPilot-Token`：
+
+- 调度中心的 `ExecutorClient` 与执行器的 `SchedulerClientFactory` 都在构造 `RestClient` 时
+  用 `.defaultHeader(...)` 带上 token —— 一次配置，所有内部调用自动带上，不用每处调用点操心；
+- 调度中心只保护 `POST /api/v1/executors/register` 与 `POST /api/v1/executors/heartbeat`
+  （按**路径 + 方法**匹配：`GET /api/v1/executors` 是管理查询，保持开放）；
+- 执行器保护 `/api/v1/executor/**`（执行 + 处理器列表），`/actuator/health` 放行。
+
+### 为什么管理 API 保持开放
+
+管理接口（任务 CRUD、执行记录查询、仪表盘、演示页）**不保护**，只跑在内网 demo 环境：
+
+- 演示体验是"打开页面就能看"。全部加上鉴权就要先登录，收益（防内网里的好奇同事）
+  远小于代价（演示脚本、curl 示例、验收脚本全要带 token，README 里一半的命令都要改）；
+- 管理接口的破坏面比内部接口小得多：最坏是有人改了任务配置，而不是把执行器顶下线；
+- 真正的生产部署里，这一层应该交给网关 / 网络策略，而不是在应用里做半套认证。
+
+**边界写清楚**：管理 API 开放 = **仅限内网**。这一点在 README 与演示页上都要写明。
+
+### 为什么不上 Spring Security
+
+一个"共享静态 token 校验"用不着 Spring Security 的那一整套：过滤器链、用户体系、
+密码编码器、AuthenticationProvider、@PreAuthorize 表达式……加进来的成本远大于收益，
+而且会把"演示项目"的依赖树撑大。Spring Security 适合"多用户 + 角色 + 会话"的场景，
+这里的场景是"两个服务之间共享一把钥匙"，一个 `OncePerRequestFilter` 就够了。
+
+如果将来真要上 Spring Security，应该上的是"管理 API 的用户登录 + 角色"，
+而不是替换掉这把内部 token —— 两者解决的是不同的问题。
+
+### 为什么用常量时间比对
+
+token 比对用 `MessageDigest.isEqual` 而不是 `String.equals`：`String.equals` 逐字符比较、
+遇到第一个不匹配就返回，**耗时差可以被用来一位一位地猜 token**（时序侧信道）。
+`MessageDigest.isEqual` 的耗时与是否匹配基本无关。
+
+同理，**没配 token 时一律拒绝**（fail-closed）：漏配 `TASKPILOT_AUTH_TOKEN` 就把内部接口
+裸奔出去，比"直接起不来"危险得多。启动时打一条 ERROR 日志说明原因。
+
+**代价**：
+
+- 静态 token 没有过期、没有轮换、没有审计。真要上生产得换成带 TTL 的短期 token 或 mTLS。
+- 两个应用必须配成同一个值：配错的话症状是"执行器注册 401"，从日志里能一眼看出来
+  （`request rejected, invalid token`）。
+- token 走明文 HTTP（演示环境没有 TLS）。生产环境必须上 TLS，否则 token 等于明文。
+- 管理 API 仍然没有鉴权，只靠"仅限内网"这条约定兜着。

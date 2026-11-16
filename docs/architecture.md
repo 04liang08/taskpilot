@@ -36,6 +36,7 @@
 - 执行器注册表：注册 / 心跳 / 超时下线；第 3 周扩展为分片与失败转移依据。
 - 执行记录：先落 `RUNNING` 再派发，第 4 周起结果经 RabbitMQ 异步回来，最终更新为 `SUCCESS/FAILED/TIMEOUT`。
 - 管理端：REST API + `static/index.html` 极简演示页。
+- **执行器注册与心跳要带共享 token**（`X-TaskPilot-Token`）；管理接口与 actuator 保持开放（ADR-020）。
 
 ### executor
 
@@ -44,6 +45,8 @@
 - 接收 `POST /api/v1/executor/execute`，按 `handlerName` 从注册表找到处理器并执行。
 - 线程池隔离，结果同步返回（第 3 周再考虑异步与超时控制）。
 - 无状态，可水平扩展；地址必须能被调度中心访问。
+- **内部接口要带共享 token**（`X-TaskPilot-Token`）：调度中心 → 执行器的
+  `/api/v1/executor/**` 全部受保护，`/actuator/**` 放行（ADR-020）。
 
 ### common
 

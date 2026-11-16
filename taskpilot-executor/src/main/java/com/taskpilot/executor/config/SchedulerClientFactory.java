@@ -1,5 +1,7 @@
 package com.taskpilot.executor.config;
 
+import com.taskpilot.common.auth.AuthProperties;
+import com.taskpilot.common.auth.AuthToken;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
@@ -15,6 +17,7 @@ import java.util.List;
  * <p>支持多个地址是为了解决"执行器只注册一个调度中心"的单点问题：
  * 任意一个调度中心挂掉时，执行器仍能通过另一个地址完成注册与心跳，
  * 不会因为心跳断掉被误判成离线。</p>
+ * <p>注册与心跳是调度中心的内部接口，请求要带共享 token（ADR-020）。</p>
  */
 @Component
 public class SchedulerClientFactory {
@@ -24,7 +27,7 @@ public class SchedulerClientFactory {
     private final List<String> addresses;
     private final List<RestClient> clients;
 
-    public SchedulerClientFactory(ExecutorProperties properties) {
+    public SchedulerClientFactory(ExecutorProperties properties, AuthProperties authProperties) {
         List<String> resolved = new ArrayList<>();
         for (String baseUrl : properties.getSchedulerBaseUrl().split(",")) {
             String trimmed = baseUrl.trim();
@@ -42,6 +45,7 @@ public class SchedulerClientFactory {
             list.add(RestClient.builder()
                     .baseUrl(address)
                     .requestFactory(requestFactory)
+                    .defaultHeader(AuthToken.HEADER, authProperties.getToken())
                     .build());
         }
         this.clients = List.copyOf(list);

@@ -27,6 +27,11 @@ spring:
 
 # Nacos 配置中心在后续接入：以 optional: 方式导入，本地无 Nacos 也能启动。
 taskpilot:
+  auth:
+    # 双向共享静态 token：与调度中心读的是同一个配置项 taskpilot.auth.token，
+    # 两边一致才能互相调通。请求头是 X-TaskPilot-Token。
+    # 这里的默认值只用于本机开发，生产环境必须用 TASKPILOT_AUTH_TOKEN 覆盖！
+    token: ${TASKPILOT_AUTH_TOKEN:taskpilot-dev-token}
   executor:
     app-name: taskpilot-executor
     group: DEFAULT

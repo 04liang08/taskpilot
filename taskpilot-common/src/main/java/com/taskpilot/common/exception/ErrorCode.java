@@ -9,6 +9,7 @@ public enum ErrorCode {
     BAD_REQUEST(40000, "参数错误"),
     NOT_FOUND(40400, "资源不存在"),
     CONFLICT(40900, "资源冲突"),
+    UNAUTHORIZED(40100, "未授权"),
     EXECUTOR_UNAVAILABLE(50001, "执行器不可用"),
     INTERNAL_ERROR(50000, "服务内部错误");
 
