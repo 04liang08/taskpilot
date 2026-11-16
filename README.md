@@ -5,9 +5,10 @@
 [![CI](https://github.com/MrCai/TaskPilot/actions/workflows/ci.yml/badge.svg)](https://github.com/MrCai/TaskPilot/actions/workflows/ci.yml)
 <!-- 徽章里的仓库名换成你自己的 slug 后就会亮起来 -->
 
-> 当前状态：第 4 周 Day 2 —— 执行结果改走 RabbitMQ 异步上报（调度中心只拿 ACK，结果经 MQ 回传），
+> 当前状态：第 4 周 Day 3 —— 执行结果改走 RabbitMQ 异步上报（调度中心只拿 ACK，结果经 MQ 回传），
 > 手动触发统一返回 `RUNNING` 由页面轮询；重试耗尽与毒消息落死信表并广播告警；
-> 内部接口双向共享 token 鉴权；GitHub Actions CI（单测 + 端到端冒烟）已就绪。
+> 内部接口双向共享 token 鉴权；GitHub Actions CI（单测 + 端到端冒烟）已就绪；
+> JMeter 三档并发实测 TPS 111/200/267、错误率 0，见 [压测报告](docs/perf-report.md)。
 > 第 1~3 周能力（分片并发、失败转移、退避重试、幂等）均已就绪。
 
 ## 1. 它解决什么问题

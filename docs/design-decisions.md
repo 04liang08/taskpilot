@@ -489,8 +489,9 @@ Windows 专属能力，ubuntu runner 上跑不了。硬把它改成跨平台，�
    mysql -h 127.0.0.1 -u root -proot -e "GRANT ALL PRIVILEGES ON taskpilot.* TO 'taskpilot'@'%'; FLUSH PRIVILEGES;"
    mysql -h 127.0.0.1 -u taskpilot -ptaskpilot taskpilot < deploy/sql/01-init.sql
    ```
-   第一条不能省：`01-init.sql` 开头有 `CREATE DATABASE IF NOT EXISTS taskpilot`，
-   而 service container 里的 `taskpilot` 用户只有库级权限，缺 CREATE 权限会报错。
+   第一条是显式保险，不是硬前提：`01-init.sql` 开头有 `CREATE DATABASE IF NOT EXISTS taskpilot`，
+   而 service container 里的 `taskpilot` 用户拿的是 `ALL ON taskpilot.*`——库级 ALL 本身含 CREATE，
+   恰好能建本库。GRANT 只是把这个隐含依赖写明白，省掉一般也能过。
 2. **service container 映射到 runner 的 127.0.0.1**，不是容器名。所以脚本里
    MySQL / Redis / RabbitMQ 的地址都默认 `127.0.0.1`，靠环境变量覆盖。
 

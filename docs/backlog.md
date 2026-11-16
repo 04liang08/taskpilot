@@ -15,7 +15,8 @@
 > **第 4 周 Day 2 追加**：A-3 里的「鉴权」（ADR-020）与「CI」（ADR-021）已落地。
 >
 > **第 4 周 Day 3 追加**：A-3 的「压测」（4.8）完成——[压测报告](perf-report.md) 给出
-> 50/100/200 并发实测（TPS 111/200/267，0 错误）与异步管道持续负载观测；压测中新发现 B-08（见下）。
+> 50/100/200 并发实测（TPS 111/200/267，0 错误）与异步管道持续负载观测；压测中新发现 B-08/B-09（见下）。
+> **A-3 复审已通过（可合并）**；复审新记 **B-10**（鉴权 filter 原始 URI 匹配的编码绕过加固缝，见下），不阻塞合并。
 > 下面是剩下的条目。
 
 ## A. Week 4 起点
@@ -120,6 +121,18 @@
 - **建议**：下线事件里若发现同 `(appName,address)` 行在本调度中心启动周期内刚重新注册成功（或恢复心跳），
   跳过对在途记录的 failover；或注册 upsert 时立即刷新 `last_heartbeat_time` 再交给扫描线程比较。
 - **优先级**：中低（窗口小、可被下一次验收重跑掩盖，但滚动重启场景会踩）。
+
+### B-10 鉴权 filter 用原始 URI 匹配，百分号编码前缀可绕过（4.7 复审发现）
+
+- **位置**：`scheduler/.../filter/AuthTokenFilter.java#requiresToken`、`executor/.../filter/AuthTokenFilter.java#requiresToken`。
+- **现状**：两者都对 `request.getRequestURI()`（未解码）做 `equals`/`startsWith`。
+  请求 `/api/v1/%65xecutor/execute`（或 `/api/v1/executors/%72egister`）时，原始 URI 不含字面前缀 →
+  filter 放行；Spring 的 PathPattern 按解码后路径仍映射到处理器 → 不带 token 也能调内部接口。
+- **影响**：低。ADR-020 威胁模型是内网 demo，真实攻击面（无/错 token、伪造下线）已挡住；
+  这是一条理论加固缝，不影响现有正确性与验收。
+- **建议**：改用解码后路径匹配（`request.getServletPath()` 或 `ServletRequestPathUtils.getCachedPath(request)`），
+  补一个「编码前缀仍被拒」的单测。
+- **优先级**：低（可选加固）。
 
 ## C. 本地环境 / 卫生（非代码，不影响交付）
 
