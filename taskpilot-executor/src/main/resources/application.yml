@@ -5,6 +5,23 @@ server:
 spring:
   application:
     name: taskpilot-executor
+  rabbitmq:
+    # 第 4 周起：执行结果异步上报（执行器 -> 调度中心）。
+    host: ${TASKPILOT_RABBITMQ_HOST:127.0.0.1}
+    port: ${TASKPILOT_RABBITMQ_PORT:5672}
+    username: ${TASKPILOT_RABBITMQ_USERNAME:taskpilot}
+    password: ${TASKPILOT_RABBITMQ_PASSWORD:taskpilot}
+    virtual-host: ${TASKPILOT_RABBITMQ_VHOST:/}
+    # 发布确认：结果消息必须确认落到 broker，否则调度中心收不到结果。
+    publisher-confirm-type: correlated
+    publisher-returns: true
+    template:
+      mandatory: true
+    listener:
+      simple:
+        # broker 不可达 / 队列还不存在时不能把应用启动卡死。
+        missing-queues-fatal: false
+        default-requeue-rejected: false
   jackson:
     time-zone: Asia/Shanghai
     date-format: yyyy-MM-dd HH:mm:ss.SSS

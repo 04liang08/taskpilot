@@ -65,7 +65,7 @@
 ### 5.1 启动基础设施
 
 ```bash
-docker compose -f deploy/docker-compose.yml up -d mysql redis nacos
+docker compose -f deploy/docker-compose.yml up -d mysql redis nacos rabbitmq
 ```
 
 首次启动 MySQL 会自动执行 `deploy/sql/01-init.sql`，创建 `tp_task`、`tp_executor`、`tp_execution_log`、`tp_leader` 四张表。
@@ -73,6 +73,8 @@ docker compose -f deploy/docker-compose.yml up -d mysql redis nacos
 > `01-init.sql` 已包含 Week 2/3 的全部内容（`tp_leader`、fencing 列、`next_retry_time`）。`02-week2-leader.sql`、`03-week3-retry.sql` 只用于**老库升级**，在全新库上再执行会报重复表 / 重复列。
 
 > 第 2 周 Day 3 起，调度中心需要 Redis 做领导选举；只起 MySQL 的话定时触发不会工作（单机开发可设 `taskpilot.scheduler.election.enabled=false`）。
+
+> 第 4 周起，执行结果改走 RabbitMQ 异步上报（5672，管理界面 <http://localhost:15672>，账号 taskpilot/taskpilot）。**broker 不可达时应用照常启动**（懒连接），但结果回不来——调度中心的僵尸回收会把这类记录兜底标成 TIMEOUT。第 1~3 周的核心功能（手动触发 + 定时触发）在没有 RabbitMQ 时仍然可用，只是执行结果不再经 MQ 回传。
 
 > 如果本机 3306 已被占用，先停止本地 MySQL 服务，或修改 compose 中的端口映射。
 > Nacos 启动较慢且当前应用不强依赖它，只起 MySQL 也能开发。

@@ -23,5 +23,13 @@
       <groupId>com.fasterxml.jackson.datatype</groupId>
       <artifactId>jackson-datatype-jsr310</artifactId>
     </dependency>
+
+    <!-- RabbitMQ 拓扑声明（交换机/队列/绑定）。
+         只用 spring-amqp 的抽象模型，不引入客户端与 Spring 容器，
+         保持 common 轻量、可被任意模块引用。 -->
+    <dependency>
+      <groupId>org.springframework.amqp</groupId>
+      <artifactId>spring-amqp</artifactId>
+    </dependency>
   </dependencies>
 </project>

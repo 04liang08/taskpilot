@@ -55,6 +55,12 @@
       <artifactId>redisson-spring-boot-starter</artifactId>
     </dependency>
 
+    <!-- 结果异步上报：消费执行器回传的执行结果 -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-amqp</artifactId>
+    </dependency>
+
     <dependency>
       <groupId>org.projectlombok</groupId>
       <artifactId>lombok</artifactId>

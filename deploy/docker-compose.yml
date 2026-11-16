@@ -45,7 +45,28 @@ services:
     volumes:
       - taskpilot-nacos:/home/nacos/data
 
+  # 第 4 周起需要：执行结果异步上报 + 死信告警走 RabbitMQ。
+  # 5672 是 AMQP 端口，15672 是管理界面（http://127.0.0.1:15672，taskpilot/taskpilot）。
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: taskpilot-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: taskpilot
+      RABBITMQ_DEFAULT_PASS: taskpilot
+      TZ: Asia/Shanghai
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - taskpilot-rabbitmq:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
 volumes:
   taskpilot-mysql:
   taskpilot-redis:
   taskpilot-nacos:
+  taskpilot-rabbitmq:
