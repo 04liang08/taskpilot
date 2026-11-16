@@ -275,6 +275,9 @@ public class ExecutionService {
     /**
      * 失败并安排退避重试。
      * <p>nextRetryTime 为空表示这次失败就是终态（不再重试）。</p>
+     * <p>带状态前置条件（FAILED / TIMEOUT）：迟到的失败事件不能把记录覆写回 FAILED。
+     * 失败转移已经用 {@code claimForRetryOn} 把记录抢成 RUNNING 时，
+     * 这条记录归转移逻辑管，再挂一次 next_retry_time 会造成状态回退和重复重试。</p>
      */
     public ExecutionLogEntity markFailedForRetry(ExecutionLogEntity execution,
                                                  String errorMessage,
@@ -283,6 +286,7 @@ public class ExecutionService {
         long durationMs = elapsedMs(execution.getStartTime());
         executionLogMapper.update(null, Wrappers.<ExecutionLogEntity>lambdaUpdate()
                 .eq(ExecutionLogEntity::getId, execution.getId())
+                .in(ExecutionLogEntity::getStatus, ExecutionStatus.FAILED, ExecutionStatus.TIMEOUT)
                 .set(ExecutionLogEntity::getStatus, ExecutionStatus.FAILED)
                 .set(ExecutionLogEntity::getEndTime, now)
                 .set(ExecutionLogEntity::getDurationMs, durationMs)

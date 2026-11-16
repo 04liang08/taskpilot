@@ -345,6 +345,23 @@ class ExecutionServiceTest {
     }
 
     @Test
+    void markFailedForRetryOnlyUpdatesAlreadyFailedRecords() {
+        // B-01：迟到的失败事件不能把记录覆写回 FAILED。
+        // 失败转移用 claimForRetryOn 把记录抢成 RUNNING 之后，这条记录归转移逻辑管，
+        // 再挂一次 next_retry_time 会造成状态回退与重复重试。
+        ExecutionLogEntity execution = runningExecution(116L);
+        when(executionLogMapper.update(isNull(), any())).thenReturn(0);
+        when(executionLogMapper.selectById(116L)).thenReturn(execution);
+
+        executionService.markFailedForRetry(execution, "等待退避重试", LocalDateTime.now().plusSeconds(10));
+
+        LambdaUpdateWrapper<ExecutionLogEntity> wrapper = captureUpdate();
+        assertThat(wrapper.getSqlSegment()).contains("id", "status");
+        assertThat(wrapper.getParamNameValuePairs().values())
+                .contains(ExecutionStatus.FAILED, ExecutionStatus.TIMEOUT);
+    }
+
+    @Test
     void existsRunningFindsUnfinishedRecordsOfTheTask() {
         // 第 4 周起触发变异步，"任务正在执行中"要查 DB：集群里别的实例跑着的任务，这边也要拒。
         when(executionLogMapper.selectCount(any())).thenReturn(1L);
