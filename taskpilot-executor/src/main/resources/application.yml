@@ -43,6 +43,12 @@ taskpilot:
       core-size: 8
       max-size: 32
       queue-capacity: 256
+    # 调度线程池：执行接口只回 ACK，处理器在这里跑完并把结果发回调度中心。
+    # 线程数 = 同时能跑的分片数；队列满时直接拒绝，调度中心会标失败并重试。
+    dispatch-pool:
+      core-size: 16
+      max-size: 32
+      queue-capacity: 64
 
 management:
   endpoints:

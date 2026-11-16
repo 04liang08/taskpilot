@@ -35,6 +35,13 @@ public class ExecutorProperties {
 
     private ThreadPool threadPool = new ThreadPool();
 
+    /**
+     * 调度线程池：等处理器跑完并把结果发回调度中心。
+     * <p>第 4 周起执行接口只回 ACK，处理器在后台跑，
+     * 这个池的线程数决定了"同时能跑多少个分片"。</p>
+     */
+    private DispatchPool dispatchPool = new DispatchPool();
+
     @Getter
     @Setter
     public static class ThreadPool {
@@ -44,5 +51,16 @@ public class ExecutorProperties {
         private int maxSize = 32;
 
         private int queueCapacity = 256;
+    }
+
+    @Getter
+    @Setter
+    public static class DispatchPool {
+
+        private int coreSize = 16;
+
+        private int maxSize = 32;
+
+        private int queueCapacity = 64;
     }
 }
