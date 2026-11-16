@@ -440,3 +440,69 @@ token 比对用 `MessageDigest.isEqual` 而不是 `String.equals`：`String.equa
   （`request rejected, invalid token`）。
 - token 走明文 HTTP（演示环境没有 TLS）。生产环境必须上 TLS，否则 token 等于明文。
 - 管理 API 仍然没有鉴权，只靠"仅限内网"这条约定兜着。
+
+## ADR-021：CI 用 bash 冒烟子集，与本机 .ps1 完整验收并存
+
+**决策**：GitHub Actions 两个 job：
+
+| job | 内容 | 依赖外部服务 |
+|---|---|---|
+| `build-and-test` | `mvn -B clean verify`（纯单元测试）+ 上传 surefire 报告 | 无 |
+| `e2e-smoke` | `bash scripts/e2e-smoke.sh`（3 个场景，约 90 秒） | MySQL / Redis / RabbitMQ（GitHub service containers） |
+
+### 为什么 bash 冒烟脚本独立于 .ps1 完整验收
+
+现有的 `scripts/verify-week3.ps1`、`scripts/verify-week4.ps1` 是**本机完整验收**，
+覆盖 5~6 个场景、要几分钟、而且用 `Get-NetTCPConnection` 按端口定位进程 —— 这是
+Windows 专属能力，ubuntu runner 上跑不了。硬把它改成跨平台，会让一个"给人看的、
+带交互输出和实测数字汇总的验收脚本"变得四不像。
+
+所以拆成两个：
+
+- **`scripts/e2e-smoke.sh`**：Linux/bash，只保留"快且关键"的子集
+  （① cron 任务经 MQ 落 SUCCESS；② 手动触发快回 RUNNING；③ 重试耗尽落死信），
+  按 PID 管理进程，退出码 0/1 可接 CI；
+- **`.ps1` 完整验收**：本机跑，负责产出 README / 报告里的实测数字（含 failover 计时、
+  死信行数、广播记录数等），CI 不重复这些慢场景。
+
+两者**并存、互不替代**：CI 保证"提交上去不会把主链路跑坏"，完整验收保证"发布前
+五个场景都验过并留下数字"。
+
+### bash 脚本的依赖取舍
+
+只依赖 coreutils（grep / sed / date / nohup）+ curl + mysql 客户端：
+
+- 不依赖 jq / python：ubuntu runner 上虽然都有，但少一个少一份风险；
+- JSON 解析用 `grep -o` + `sed` 取字段，够用且没有依赖；
+- 端口探测用 bash 内建的 `/dev/tcp`，不依赖 nc / ss。
+
+踩过的坑（已修）：`exec 3<&- 3>&- 2>/dev/null` 这行里的 `2>/dev/null` 会对当前 shell
+**永久**重定向 stderr，把后面所有日志（包括 `set -x` 的 trace）一起吞掉——
+排查时看起来像"脚本没执行到那一步"。
+
+### service containers 的两个注意点
+
+1. **不会自动执行初始化脚本**。`deploy/docker-compose.yml` 靠
+   `/docker-entrypoint-initdb.d` 自动跑 `deploy/sql/01-init.sql`，但 GitHub 的
+   service container 没有这个机制，**建表必须手动做**：
+   ```bash
+   mysql -h 127.0.0.1 -u root -proot -e "GRANT ALL PRIVILEGES ON taskpilot.* TO 'taskpilot'@'%'; FLUSH PRIVILEGES;"
+   mysql -h 127.0.0.1 -u taskpilot -ptaskpilot taskpilot < deploy/sql/01-init.sql
+   ```
+   第一条不能省：`01-init.sql` 开头有 `CREATE DATABASE IF NOT EXISTS taskpilot`，
+   而 service container 里的 `taskpilot` 用户只有库级权限，缺 CREATE 权限会报错。
+2. **service container 映射到 runner 的 127.0.0.1**，不是容器名。所以脚本里
+   MySQL / Redis / RabbitMQ 的地址都默认 `127.0.0.1`，靠环境变量覆盖。
+
+### 打包命令
+
+e2e job 用 `mvn -B clean package -DskipTests`（不用 `-Dmaven.test.skip=true`）：
+测试代码仍然编译，测试编译失败会让 job 直接失败——这比"悄悄用旧 jar 跑冒烟"要好
+（README 5.2 踩过这个坑）。测试本身由 `build-and-test` job 负责。
+
+**代价**：
+
+- CI 只跑 3 个场景，failover、广播、改 cron 这些慢场景不在 CI 里。
+  它们靠本机完整验收 + 评审保证。
+- service container 的端口是固定的（3306 / 6379 / 5672），CI runner 上如果被占用会起不来
+  （GitHub 的 runner 是全新的，一般不会）。

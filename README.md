@@ -2,8 +2,13 @@
 
 分布式任务调度平台：**调度中心（scheduler）+ 执行器（executor）** 两段式架构。
 
-> 当前状态：第 4 周 Day 1 —— 执行结果改走 RabbitMQ 异步上报（调度中心只拿 ACK，结果经 MQ 回传），
-> 手动触发统一返回 `RUNNING` 由页面轮询；重试耗尽与毒消息落死信表并广播告警。第 1~3 周能力（分片并发、失败转移、退避重试、幂等）均已就绪。
+[![CI](https://github.com/MrCai/TaskPilot/actions/workflows/ci.yml/badge.svg)](https://github.com/MrCai/TaskPilot/actions/workflows/ci.yml)
+<!-- 徽章里的仓库名换成你自己的 slug 后就会亮起来 -->
+
+> 当前状态：第 4 周 Day 2 —— 执行结果改走 RabbitMQ 异步上报（调度中心只拿 ACK，结果经 MQ 回传），
+> 手动触发统一返回 `RUNNING` 由页面轮询；重试耗尽与毒消息落死信表并广播告警；
+> 内部接口双向共享 token 鉴权；GitHub Actions CI（单测 + 端到端冒烟）已就绪。
+> 第 1~3 周能力（分片并发、失败转移、退避重试、幂等）均已就绪。
 
 ## 1. 它解决什么问题
 
@@ -53,7 +58,7 @@
 - MyBatis-Plus 3.5.7 + MySQL 8
 - Redis / Redisson（第 2 周起）
 - RabbitMQ 3（第 4 周起：结果异步上报 + 死信告警）
-- Docker Compose、JMeter、GitHub Actions（第 4 周）
+- Docker Compose、JMeter、GitHub Actions（第 4 周起：CI = 单测 + 端到端冒烟）
 - springdoc-openapi 2.5.0
 
 ## 5. 快速开始
@@ -275,6 +280,23 @@ export TASKPILOT_AUTH_TOKEN="换成你自己的长随机串"
 - token 比对用常量时间比较（`MessageDigest.isEqual`），避免时序侧信道；
   **没配 token 时内部接口一律拒绝**（fail-closed），启动日志会打一条 ERROR 说明原因。
 
+### 5.9 CI（GitHub Actions）
+
+`.github/workflows/ci.yml` 两个 job：
+
+| job | 内容 | 外部依赖 |
+|---|---|---|
+| `build-and-test` | `mvn -B clean verify`（纯单元测试），surefire 报告作为 artifact 上传 | 无 |
+| `e2e-smoke` | `bash scripts/e2e-smoke.sh`：cron 任务经 MQ 落 SUCCESS、手动触发快回 `RUNNING`、重试耗尽落死信 | MySQL / Redis / RabbitMQ（GitHub service containers） |
+
+- push 到 `main` / `feat/**` 或对 `main` 提 PR 时触发。
+- service container **不会**自动跑 `deploy/sql/01-init.sql`（不像 compose 有 `/docker-entrypoint-initdb.d`），
+  workflow 里手动建表。
+- `scripts/e2e-smoke.sh` 是 **CI 冒烟子集**（Linux/bash，退出码 0/1）；
+  `scripts/verify-week3.ps1` / `verify-week4.ps1` 仍是**本机完整验收**
+  （Windows，按端口定位进程，5~6 个场景并汇总实测数字）。两者并存、互不替代，
+  理由见 [ADR-021](docs/design-decisions.md)。
+
 ## 6. API 约定
 
 统一前缀 `/api/v1`，统一响应：
@@ -376,7 +398,8 @@ export TASKPILOT_AUTH_TOKEN="换成你自己的长随机串"
 **第 4 周**
 
 - [x] Day 1：结果异步上报（RabbitMQ：ACK + 结果消息 + DLX）+ 手动触发统一异步 + 死信表与告警广播 + `scripts/verify-week4.ps1`
-- [ ] Day 2~5：鉴权、压测（JMeter）、CI、指标（Micrometer）
+- [x] Day 2：内部接口双向共享 token 鉴权（ADR-020）+ GitHub Actions CI（单测 + bash 冒烟，ADR-021）
+- [ ] Day 3~5：压测（JMeter）、Micrometer 指标、CI 增强
 
 ## 8. 文档索引
 
@@ -420,6 +443,7 @@ export TASKPILOT_AUTH_TOKEN="换成你自己的长随机串"
 | ~~结果上报仍是同步 HTTP 回包~~ | **已修复（4.2/4.3）**：执行器只回 ACK，结果经 RabbitMQ 异步回传；手动触发统一返回 `RUNNING`，页面轮询终态 | — |
 | 执行器结果回传依赖 RabbitMQ | broker 不可达时应用仍能启动，但结果回不来，要等僵尸回收（`timeout + grace`）兜底标 TIMEOUT | ADR-019 已如实记录；保持现状 |
 | 执行器接口无鉴权 | — | **已修复（4.7）**：内部接口（调度中心↔执行器）用双向共享静态 token 保护；管理 API 仍开放（仅限内网） | — |
+| ~~没有 CI~~ | — | **已修复（4.9）**：GitHub Actions 两个 job（`mvn clean verify` + bash 端到端冒烟），service container 带 mysql/redis/rabbitmq | — |
 | 没有压测数据 | 简历里不能写吞吐/延迟数字 | Week 4：JMeter 实测 |
 
 ## 11. Roadmap
