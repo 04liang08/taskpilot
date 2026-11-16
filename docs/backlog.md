@@ -6,7 +6,11 @@
 >
 > **第 4 周 Day 1 已完成**：A-1（结果异步上报）与 A-2（死信告警）落地，
 > 见 [ADR-019](design-decisions.md#adr-019结果异步上报走-rabbitmq手动触发也统一异步)。
-> B-01 一并修掉了。下面是剩下的条目。
+> B-01 一并修掉了。
+>
+> **第 4 周 Day 1 交付已通过评审方复审**（7 个 commit 逐项通过，`mvn clean verify` 148 测试全绿，
+> `verify-week4.ps1` 五场景证据核实）。复审新增遗留 **B-05 ~ B-07**（见下），
+> 均不影响合并、不影响执行正确性。下面是剩下的条目。
 
 ## A. Week 4 起点
 
@@ -49,6 +53,40 @@
 - **待决策**：唯一键形态。直接 `UNIQUE(task_name)` 会和逻辑删除行冲突（同名任务删除后无法重建）；候选是 `UNIQUE(task_name, deleted)`（仍限制同名只能有一条删除记录）、`(task_name, deleted, id)` 生成列，或改用「仅对未删除行生效」的生成列唯一索引。
 - **建议**：先出一条 ADR 明确语义与迁移方案，再改 DDL + 补 `DuplicateKeyException` 兜底测试。
 - **优先级**：低，需先决策。
+
+### B-05 `markRetryExhausted` 无条件落死信
+
+- **位置**：`taskpilot-scheduler/src/main/java/com/taskpilot/scheduler/service/ExecutionService.java#markRetryExhausted`。
+- **现状**：守卫 UPDATE（`status IN ('FAILED','TIMEOUT')`）命中 0 行时，**仍然**调 `deadLetterService.record()`——死信写入没有以"确实收成终态"为前提。
+- **风险**：极窄竞态——记录已被并发 claim 成 RUNNING、随后重试成功，却留下一条"重试耗尽"死信。**取证失真，不影响执行正确性**（死信表只是给人看的记录，不参与任何调度判断）。
+- **建议**：`record` 以 affected > 0 为前提（或落库前复核记录确为终态）；补一个时序单测
+  （UPDATE 命中 0 行 → 不落死信）。
+- **优先级**：低。
+
+### B-06 跨 attempt 的迟到结果无关联
+
+- **位置**：`common/.../dto/ExecutionResultMessage.java`、`scheduler/.../service/ResultProcessor.java#process`、
+  `scheduler/.../service/ExecutionService.java#finishIfRunning`。
+- **现状**：结果消息不带 `retryCount` / attempt 维度（只有 executionId、taskId、status、durationMs、
+  errorMessage、resultSummary、executorAddress、reportedAt），而 `finishIfRunning` 只查 `status = RUNNING`。
+  于是 **attempt N 的迟到结果可能收尾 attempt N+1 的 RUNNING 记录**。
+- **影响**：在"至少一次 + 业务幂等"语义内（终态仍然只写一次），但**记录终态可能来自旧 attempt**：
+  `executor_id` / `executor_address` 已经被失败转移改指向新执行器，而终态与结果摘要却来自上一轮那次执行。
+  `docs/architecture.md` 的边界表写了"可能执行两遍"，**没写这个取证上的细微处**。
+- **建议**：
+  - **短期（文档先行）**：边界表补一句——"迟到结果可能覆盖新一轮 attempt 的记录，终态与 `executor` 列可能来自不同轮次"；
+  - **长期**：消息带 attempt 维度（发消息时把 `retry_count` 带上去），`finish` 的前置条件加上 attempt 匹配。
+- **优先级**：低（文档先行）。
+
+### B-07 `ShardFailedEvent` 在事务内同步发布（可选加固）
+
+- **位置**：`scheduler/.../service/ResultProcessor.java#process`（`@Transactional`）内的 `publishShardFailed`。
+- **现状**：失败事件在事务提交**之前**同步发布，监听器（`RetryService.onShardFailed` /
+  `ShardFailoverService.onShardFailed`）跑在同一个事务里。失败转移的异步路径可能读到未提交状态，
+  **靠现有守卫（`status IN (FAILED,TIMEOUT)` 前置条件）收敛，不是 bug**。
+- **建议**：改成 `@TransactionalEventListener(phase = AFTER_COMMIT)` 更干净——监听器只在提交后跑，
+  语义上"失败已经落库了才通知别人"也更直观。
+- **优先级**：可选。
 
 ## C. 本地环境 / 卫生（非代码，不影响交付）
 
