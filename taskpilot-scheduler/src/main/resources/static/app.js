@@ -343,6 +343,40 @@ function refreshExecutionsSoon() {
   }, 3000);
 }
 
+function sleep(millis) {
+  return new Promise((resolve) => setTimeout(resolve, millis));
+}
+
+/**
+ * 轮询一条执行记录直到落终态。
+ * <p>第 4 周起触发是异步的：接口只回"已提交"，真正的结果由执行器经 MQ 回传。
+ * 这里轮询执行记录详情，终态了再提示一次。</p>
+ */
+async function pollExecution(executionId, attempts = 60) {
+  for (let i = 0; i < attempts; i++) {
+    await sleep(1000);
+    let execution = null;
+    try {
+      execution = await api(`/executions/${executionId}`);
+    } catch (error) {
+      continue;
+    }
+    if (!execution || execution.status === 'RUNNING') {
+      continue;
+    }
+    const status = EXECUTION_STATUS[execution.status] || { label: execution.status };
+    const duration = execution.durationMs == null ? '-' : `${execution.durationMs} ms`;
+    toast(`执行记录 #${executionId}：${status.label}（${duration}）`,
+      execution.status === 'SUCCESS' ? 'success' : 'error');
+    loadOverview();
+    if (state.tab === 'executions') {
+      loadExecutions();
+    }
+    return;
+  }
+  toast(`执行记录 #${executionId} 仍在执行中，稍后刷新查看`, 'info');
+}
+
 function openDialog(task = null) {
   state.editingId = task ? task.id : null;
   $('#dialog-title').textContent = task ? `编辑任务 #${task.id}` : '新建任务';
@@ -468,11 +502,10 @@ async function handleTaskAction(event) {
     button.disabled = true;
     try {
       const result = await api(`/tasks/${id}/trigger`, { method: 'POST' });
-      const status = EXECUTION_STATUS[result.status] || { label: result.status };
-      const duration = result.durationMs == null ? '-' : `${result.durationMs} ms`;
       const shard = result.shardTotal > 1 ? ` · ${result.shardTotal} 分片` : '';
-      toast(`执行记录 #${result.executionId}：${status.label}（${duration}）${shard}`,
-        result.status === 'SUCCESS' ? 'success' : 'error');
+      // 第 4 周起触发是异步的：接口立即返回，执行结果由执行器经 MQ 回传后才落终态。
+      toast(`已提交，执行记录 ID=${result.executionId}${shard}`, 'success');
+      pollExecution(result.executionId);
       loadOverview();
       refreshExecutionsSoon();
     } catch (error) {

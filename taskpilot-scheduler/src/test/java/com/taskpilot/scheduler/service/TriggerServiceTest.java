@@ -1,7 +1,7 @@
 package com.taskpilot.scheduler.service;
 
+import com.taskpilot.common.dto.ExecuteAck;
 import com.taskpilot.common.dto.ExecuteRequest;
-import com.taskpilot.common.dto.ExecuteResult;
 import com.taskpilot.common.enums.ExecutionStatus;
 import com.taskpilot.common.enums.TaskStatus;
 import com.taskpilot.common.enums.TriggerType;
@@ -24,10 +24,10 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
-import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.web.client.ResourceAccessException;
 
+import java.net.SocketTimeoutException;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -35,8 +35,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -46,6 +44,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.never;
@@ -85,7 +84,7 @@ class TriggerServiceTest {
     private ThreadPoolTaskExecutor triggerExecutor;
 
     @Mock
-    private ApplicationEventPublisher eventPublisher;
+    private ResultProcessor resultProcessor;
 
     private ThreadPoolTaskExecutor shardExecutor;
     private TriggerService triggerService;
@@ -99,7 +98,7 @@ class TriggerServiceTest {
         shardExecutor.setQueueCapacity(64);
         shardExecutor.initialize();
         triggerService = new TriggerService(taskService, executorService, executionService, executorClient,
-                leaderStateService, shardAllocatorRegistry, triggerExecutor, shardExecutor, eventPublisher);
+                leaderStateService, shardAllocatorRegistry, triggerExecutor, shardExecutor, resultProcessor);
     }
 
     @AfterEach
@@ -108,32 +107,30 @@ class TriggerServiceTest {
     }
 
     @Test
-    void triggerSelectsOnlineExecutorAndCompletesExecution() {
+    void triggerDispatchesToExecutorAndKeepsRecordRunning() {
+        // 第 4 周起：执行器只回 ACK，结果经 MQ 回传，接口返回时记录还是 RUNNING。
         TaskEntity task = enabledTask();
         ExecutorEntity executor = onlineExecutor();
         ExecutionLogEntity running = runningExecution(200L);
-        ExecutionLogEntity finished = runningExecution(200L);
-        finished.setStatus(ExecutionStatus.SUCCESS);
-        finished.setDurationMs(9L);
         when(taskService.get(1L)).thenReturn(task);
         when(executorService.listOnline()).thenReturn(List.of(executor));
         when(executionService.createRunning(eq(task), eq(executor), eq(TriggerType.MANUAL), any(), anyInt(), anyInt(),
                 anyString())).thenReturn(new CreatedExecution(running, true));
         when(executorClient.execute(eq("127.0.0.1:8081"), any(ExecuteRequest.class)))
-                .thenReturn(ExecuteResult.success("ok", 9));
-        when(executionService.complete(eq(running), any(ExecuteResult.class))).thenReturn(finished);
+                .thenReturn(ExecuteAck.ok());
 
         TriggerResult result = triggerService.trigger(1L);
 
         assertThat(result.executionId()).isEqualTo(200L);
-        assertThat(result.status()).isEqualTo(ExecutionStatus.SUCCESS);
-        assertThat(result.executions()).containsExactly(finished);
+        assertThat(result.status()).isEqualTo(ExecutionStatus.RUNNING);
+        assertThat(result.executions()).containsExactly(running);
         ArgumentCaptor<ExecuteRequest> requestCaptor = ArgumentCaptor.forClass(ExecuteRequest.class);
         verify(executorClient).execute(eq("127.0.0.1:8081"), requestCaptor.capture());
         assertThat(requestCaptor.getValue().executionId()).isEqualTo(200L);
         assertThat(requestCaptor.getValue().handlerName()).isEqualTo("demoHandler");
         assertThat(requestCaptor.getValue().timeoutSeconds()).isEqualTo(30);
-        verify(executionService).complete(eq(running), any(ExecuteResult.class));
+        // 受理成功不该走"调度侧失败"路径。
+        verify(resultProcessor, never()).processDispatchFailure(any(), any(), anyString());
     }
 
     @Test
@@ -190,6 +187,31 @@ class TriggerServiceTest {
     }
 
     @Test
+    void rejectedByExecutorBecomesFailed() {
+        // 执行器接不了（线程池满等）：调度侧自己把记录收成 FAILED，走原来的重试链路。
+        TaskEntity task = enabledTask();
+        ExecutorEntity executor = onlineExecutor();
+        ExecutionLogEntity running = runningExecution(202L);
+        ExecutionLogEntity failed = runningExecution(202L);
+        failed.setStatus(ExecutionStatus.FAILED);
+        when(taskService.get(1L)).thenReturn(task);
+        when(executorService.listOnline()).thenReturn(List.of(executor));
+        when(executionService.createRunning(eq(task), eq(executor), eq(TriggerType.MANUAL), any(), anyInt(), anyInt(),
+                anyString())).thenReturn(new CreatedExecution(running, true));
+        when(executorClient.execute(eq("127.0.0.1:8081"), any(ExecuteRequest.class)))
+                .thenReturn(ExecuteAck.rejected("执行器调度队列已满"));
+        when(resultProcessor.processDispatchFailure(eq(running), eq(ExecutionStatus.FAILED), anyString()))
+                .thenReturn(failed);
+
+        TriggerResult result = triggerService.trigger(1L);
+
+        assertThat(result.status()).isEqualTo(ExecutionStatus.FAILED);
+        assertThat(result.executions()).containsExactly(failed);
+        verify(resultProcessor).processDispatchFailure(eq(running), eq(ExecutionStatus.FAILED),
+                contains("执行器调度队列已满"));
+    }
+
+    @Test
     void triggerMarksFailedWhenExecutorConnectionFails() {
         TaskEntity task = enabledTask();
         ExecutorEntity executor = onlineExecutor();
@@ -202,50 +224,55 @@ class TriggerServiceTest {
                 anyString())).thenReturn(new CreatedExecution(running, true));
         when(executorClient.execute(eq("127.0.0.1:8081"), any(ExecuteRequest.class)))
                 .thenThrow(new ResourceAccessException("Connection refused"));
-        when(executionService.markFailed(eq(running), anyString())).thenReturn(failed);
+        when(resultProcessor.processDispatchFailure(eq(running), eq(ExecutionStatus.FAILED), anyString()))
+                .thenReturn(failed);
 
         TriggerResult result = triggerService.trigger(1L);
 
         assertThat(result.status()).isEqualTo(ExecutionStatus.FAILED);
         assertThat(result.executions()).containsExactly(failed);
-        verify(executionService).markFailed(eq(running), anyString());
-        verify(executionService, never()).markTimeout(any(ExecutionLogEntity.class), anyString());
+        verify(resultProcessor).processDispatchFailure(eq(running), eq(ExecutionStatus.FAILED), anyString());
+        verify(resultProcessor, never()).processDispatchFailure(any(), eq(ExecutionStatus.TIMEOUT), anyString());
     }
 
     @Test
-    void concurrentTriggerOfSameTaskIsRejected() throws Exception {
-        CountDownLatch entered = new CountDownLatch(1);
-        CountDownLatch release = new CountDownLatch(1);
+    void ackTimeoutBecomesTimeout() {
+        // 连 ACK 都没拿到（网络/进程层面）：算超时，不是任务超时。
         TaskEntity task = enabledTask();
         ExecutorEntity executor = onlineExecutor();
-        ExecutionLogEntity running = runningExecution(203L);
+        ExecutionLogEntity running = runningExecution(206L);
+        ExecutionLogEntity timedOut = runningExecution(206L);
+        timedOut.setStatus(ExecutionStatus.TIMEOUT);
         when(taskService.get(1L)).thenReturn(task);
         when(executorService.listOnline()).thenReturn(List.of(executor));
         when(executionService.createRunning(eq(task), eq(executor), eq(TriggerType.MANUAL), any(), anyInt(), anyInt(),
                 anyString())).thenReturn(new CreatedExecution(running, true));
         when(executorClient.execute(eq("127.0.0.1:8081"), any(ExecuteRequest.class)))
-                .thenAnswer(invocation -> {
-                    entered.countDown();
-                    release.await(5, TimeUnit.SECONDS);
-                    return ExecuteResult.success("ok", 1);
-                });
-        when(executionService.complete(eq(running), any(ExecuteResult.class))).thenReturn(running);
+                .thenThrow(new ResourceAccessException("read timed out", new SocketTimeoutException("Read timed out")));
+        when(resultProcessor.processDispatchFailure(eq(running), eq(ExecutionStatus.TIMEOUT), anyString()))
+                .thenReturn(timedOut);
 
-        java.util.concurrent.ExecutorService pool = Executors.newSingleThreadExecutor();
-        try {
-            Future<?> first = pool.submit(() -> triggerService.trigger(1L));
-            assertThat(entered.await(5, TimeUnit.SECONDS)).isTrue();
+        TriggerResult result = triggerService.trigger(1L);
 
-            assertThatThrownBy(() -> triggerService.trigger(1L))
-                    .isInstanceOf(BizException.class)
-                    .hasMessageContaining("正在执行中");
+        assertThat(result.status()).isEqualTo(ExecutionStatus.TIMEOUT);
+        verify(resultProcessor).processDispatchFailure(eq(running), eq(ExecutionStatus.TIMEOUT), anyString());
+    }
 
-            release.countDown();
-            first.get(5, TimeUnit.SECONDS);
-        } finally {
-            release.countDown();
-            pool.shutdownNow();
-        }
+    @Test
+    void concurrentTriggerOfSameTaskIsRejected() {
+        // 第 4 周起触发是异步的，进程内的内存锁失效：改成查 DB 有没有 RUNNING 记录。
+        // 这才是集群口径——别的实例跑着的任务，这边也要拒。
+        TaskEntity task = enabledTask();
+        when(taskService.get(1L)).thenReturn(task);
+        when(executionService.existsRunning(1L)).thenReturn(true);
+
+        assertThatThrownBy(() -> triggerService.trigger(1L))
+                .isInstanceOf(BizException.class)
+                .satisfies(error -> assertThat(((BizException) error).getCode())
+                        .isEqualTo(ErrorCode.CONFLICT.getCode()))
+                .hasMessageContaining("正在执行中");
+
+        verify(executorClient, never()).execute(anyString(), any(ExecuteRequest.class));
     }
 
     @Test
@@ -276,10 +303,7 @@ class TriggerServiceTest {
             execution.setShardTotal(3);
             return new CreatedExecution(execution, true);
         });
-        when(executorClient.execute(anyString(), any(ExecuteRequest.class)))
-                .thenReturn(ExecuteResult.success("ok", 5));
-        when(executionService.complete(any(ExecutionLogEntity.class), any(ExecuteResult.class)))
-                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(executorClient.execute(anyString(), any(ExecuteRequest.class))).thenReturn(ExecuteAck.ok());
 
         TriggerResult result = triggerService.trigger(1L);
 
@@ -326,15 +350,14 @@ class TriggerServiceTest {
         when(executorClient.execute(anyString(), any(ExecuteRequest.class))).thenAnswer(invocation -> {
             entered.countDown();
             assertThat(entered.await(5, TimeUnit.SECONDS)).isTrue();
-            return ExecuteResult.success("ok", 1);
+            return ExecuteAck.ok();
         });
-        when(executionService.complete(any(ExecutionLogEntity.class), any(ExecuteResult.class)))
-                .thenAnswer(invocation -> invocation.getArgument(0));
 
         TriggerResult result = triggerService.trigger(1L);
 
         assertThat(result.executions()).hasSize(2);
-        assertThat(result.status()).isEqualTo(ExecutionStatus.SUCCESS);
+        // 结果还没回来，汇总状态必须是 RUNNING，不能当成 SUCCESS。
+        assertThat(result.status()).isEqualTo(ExecutionStatus.RUNNING);
     }
 
     @Test
@@ -365,10 +388,7 @@ class TriggerServiceTest {
             execution.setShardTotal(2);
             return new CreatedExecution(execution, true);
         });
-        when(executorClient.execute(anyString(), any(ExecuteRequest.class)))
-                .thenReturn(ExecuteResult.success("ok", 5));
-        when(executionService.complete(any(ExecutionLogEntity.class), any(ExecuteResult.class)))
-                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(executorClient.execute(anyString(), any(ExecuteRequest.class))).thenReturn(ExecuteAck.ok());
         runTriggerInline();
 
         triggerService.triggerAsync(1L, LeaderContext.none(), SCHEDULED_TIME);
@@ -407,10 +427,7 @@ class TriggerServiceTest {
             execution.setShardTotal(2);
             return new CreatedExecution(execution, true);
         });
-        when(executorClient.execute(anyString(), any(ExecuteRequest.class)))
-                .thenReturn(ExecuteResult.success("ok", 5));
-        when(executionService.complete(any(ExecutionLogEntity.class), any(ExecuteResult.class)))
-                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(executorClient.execute(anyString(), any(ExecuteRequest.class))).thenReturn(ExecuteAck.ok());
         runTriggerInline();
 
         triggerService.triggerAsync(1L, LeaderContext.none(), SCHEDULED_TIME);
@@ -455,6 +472,7 @@ class TriggerServiceTest {
         task.setStatus(TaskStatus.ENABLED);
         return task;
     }
+
     private ExecutorEntity onlineExecutor() {
         ExecutorEntity executor = new ExecutorEntity();
         executor.setId(10L);

@@ -1,7 +1,7 @@
 package com.taskpilot.scheduler.client;
 
+import com.taskpilot.common.dto.ExecuteAck;
 import com.taskpilot.common.dto.ExecuteRequest;
-import com.taskpilot.common.dto.ExecuteResult;
 import com.taskpilot.scheduler.config.ExecutorDispatchProperties;
 import org.springframework.http.MediaType;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
@@ -11,11 +11,11 @@ import java.net.URI;
 
 /**
  * 按注册地址直连执行器。
- * <p>每次调用单独构造 RestClient，读超时按“任务超时 + 5 秒”计算，避免长任务被默认超时误杀。</p>
+ * <p>第 4 周起这里只做"派发"：执行接口立即回 ACK（受理与否），
+ * 真正的执行结果由执行器经 RabbitMQ 异步回传。
+ * 所以读超时按"ACK 是快操作"来配（默认 5 秒），不再跟着任务超时时间走。</p>
  */
 public class ExecutorClient {
-
-    private static final int TIMEOUT_MARGIN_SECONDS = 5;
 
     private final ExecutorDispatchProperties properties;
 
@@ -23,32 +23,29 @@ public class ExecutorClient {
         this.properties = properties;
     }
 
-    public ExecuteResult execute(String address, ExecuteRequest request) {
+    /**
+     * 派发一个执行请求。
+     *
+     * @return 执行器的受理回执
+     */
+    public ExecuteAck execute(String address, ExecuteRequest request) {
         SimpleClientHttpRequestFactory requestFactory = new SimpleClientHttpRequestFactory();
         requestFactory.setConnectTimeout(properties.getConnectTimeoutMs());
-        requestFactory.setReadTimeout(resolveReadTimeoutMs(request.timeoutSeconds()));
+        requestFactory.setReadTimeout(properties.getReadTimeoutMs());
 
         RestClient client = RestClient.builder()
                 .requestFactory(requestFactory)
                 .build();
 
-        ExecuteResult result = client.post()
+        ExecuteAck ack = client.post()
                 .uri(URI.create("http://" + address + "/api/v1/executor/execute"))
                 .contentType(MediaType.APPLICATION_JSON)
                 .body(request)
                 .retrieve()
-                .body(ExecuteResult.class);
-        if (result == null) {
-            throw new IllegalStateException("执行器返回空结果");
+                .body(ExecuteAck.class);
+        if (ack == null) {
+            throw new IllegalStateException("执行器返回空回执");
         }
-        return result;
-    }
-
-    private int resolveReadTimeoutMs(Integer timeoutSeconds) {
-        if (timeoutSeconds == null || timeoutSeconds <= 0) {
-            return properties.getReadTimeoutMs();
-        }
-        long timeoutMs = (timeoutSeconds + (long) TIMEOUT_MARGIN_SECONDS) * 1000L;
-        return (int) Math.min(timeoutMs, Integer.MAX_VALUE);
+        return ack;
     }
 }

@@ -231,7 +231,7 @@ docker exec -it taskpilot-mysql mysql -utaskpilot -ptaskpilot \
 1. 打开 <http://localhost:8080/>，概览页：任务数、在线执行器、当前 Leader 一览。
 2. 新建一个 `*/10 * * * * *` 的任务（处理器 `demoHandler`），观察任务列表的「下次触发」逐秒推进。
 3. 10 秒后切到「执行记录」Tab：出现 `triggerType=CRON` 的记录，状态成功。
-4. 点任务行的「触发」手动触发一次：toast 提示执行记录 ID 与耗时，执行记录里多一条 `MANUAL`。
+4. 点任务行的「触发」手动触发一次：toast 提示「已提交，执行记录 ID=x」，执行记录里多一条 `MANUAL`（先落 `RUNNING`，几秒后由执行器经 RabbitMQ 回传结果变成 `SUCCESS`）。
 5. 跑 `scripts/verify-cluster.ps1`：展示"两个实例只触发一次 + 强杀 leader 后 26 秒接管"。
 6. 演示 fencing：把 `tp_leader.fencing_token` 改大，旧 leader 的触发被拒（日志出现 `fencing token 失效`）。
 
@@ -249,11 +249,11 @@ docker exec -it taskpilot-mysql mysql -utaskpilot -ptaskpilot \
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| POST | `/api/v1/tasks/{id}/trigger` | 手动触发：校验启用状态、分配执行器（分片任务按策略拆片）、同步执行并返回执行记录 |
+| POST | `/api/v1/tasks/{id}/trigger` | 手动触发：校验启用状态、分配执行器（分片任务按策略拆片）、**异步派发**并立即返回 `RUNNING` 的执行记录 |
 | GET | `/api/v1/executions` | 分页查询：`page`、`size`、`taskId`、`status`、`startTime`、`endTime` |
 | GET | `/api/v1/executions/{id}` | 执行记录详情 |
 
-触发响应（分片任务会返回多条记录）：
+触发响应（分片任务会返回多条记录；第 4 周起触发是异步的，状态先是 `RUNNING`）：
 
 ```json
 {
@@ -261,10 +261,10 @@ docker exec -it taskpilot-mysql mysql -utaskpilot -ptaskpilot \
   "message": "ok",
   "data": {
     "executionId": 9,
-    "status": "SUCCESS",
+    "status": "RUNNING",
     "shardTotal": 4,
-    "durationMs": 5,
-    "executions": [{ "id": 9, "shardIndex": 0, "shardTotal": 4, "status": "SUCCESS" }]
+    "durationMs": null,
+    "executions": [{ "id": 9, "shardIndex": 0, "shardTotal": 4, "status": "RUNNING" }]
   }
 }
 ```

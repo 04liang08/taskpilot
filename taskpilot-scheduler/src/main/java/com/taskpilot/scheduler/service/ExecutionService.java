@@ -353,17 +353,23 @@ public class ExecutionService {
         return PageResult.of(result.getRecords(), result.getTotal(), result.getCurrent(), result.getSize());
     }
 
-    private ExecutionLogEntity finish(ExecutionLogEntity execution,
-                                      ExecutionStatus status,
-                                      long durationMs,
-                                      String errorMessage,
-                                      String resultSummary) {
+    /**
+     * 落终态，返回是否真的发生了状态迁移。
+     * <p>{@code false} 表示记录已经不是 RUNNING 了（重复投递、已被下线收尾、
+     * 已被其它路径收成终态）——这时不能再覆写终态列。</p>
+     */
+    public boolean finishIfRunning(ExecutionLogEntity execution,
+                                   ExecutionStatus status,
+                                   long durationMs,
+                                   String errorMessage,
+                                   String resultSummary) {
         LocalDateTime endTime = LocalDateTime.now();
         String error = truncate(errorMessage, ERROR_MESSAGE_MAX_LENGTH);
         String summary = truncate(resultSummary, RESULT_SUMMARY_MAX_LENGTH);
         // 只更新终态列：整实体 updateById 会把并发路径刚写进去的字段用旧值覆盖回去
         // （失败转移的 executor 列、claim 的 retry_count、收尾/退避的 next_retry_time）。
         // 带 status=RUNNING 前置条件：已经被下线收尾或别的路径改成终态的记录不再二次覆写。
+        // 重复投递的结果消息也因此天然幂等。
         int updated = executionLogMapper.update(null, Wrappers.<ExecutionLogEntity>lambdaUpdate()
                 .eq(ExecutionLogEntity::getId, execution.getId())
                 .eq(ExecutionLogEntity::getStatus, ExecutionStatus.RUNNING)
@@ -381,6 +387,28 @@ public class ExecutionService {
         execution.setDurationMs(durationMs);
         execution.setErrorMessage(error);
         execution.setResultSummary(summary);
+        return updated > 0;
+    }
+
+    /**
+     * 这个任务当前有没有还在跑的记录。
+     * <p>第 4 周起触发是异步的（执行结果经 RabbitMQ 回传），"任务正在执行中"
+     * 这件事不能再靠进程内的内存锁判断：集群里别的实例看不到那把锁，
+     * 而且 doTrigger 秒回、锁立刻释放，防并发就形同虚设。查 DB 才是集群口径。</p>
+     */
+    public boolean existsRunning(Long taskId) {
+        Long count = executionLogMapper.selectCount(Wrappers.<ExecutionLogEntity>lambdaQuery()
+                .eq(ExecutionLogEntity::getTaskId, taskId)
+                .eq(ExecutionLogEntity::getStatus, ExecutionStatus.RUNNING));
+        return count != null && count > 0;
+    }
+
+    private ExecutionLogEntity finish(ExecutionLogEntity execution,
+                                      ExecutionStatus status,
+                                      long durationMs,
+                                      String errorMessage,
+                                      String resultSummary) {
+        finishIfRunning(execution, status, durationMs, errorMessage, resultSummary);
         return get(execution.getId());
     }
 

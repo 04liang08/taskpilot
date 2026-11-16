@@ -324,6 +324,47 @@ class ExecutionServiceTest {
         assertThat(execution.getExecutorAddress()).isEqualTo("127.0.0.1:8081");
     }
 
+    @Test
+    void existsRunningFindsUnfinishedRecordsOfTheTask() {
+        // 第 4 周起触发变异步，"任务正在执行中"要查 DB：集群里别的实例跑着的任务，这边也要拒。
+        when(executionLogMapper.selectCount(any())).thenReturn(1L);
+
+        assertThat(executionService.existsRunning(1L)).isTrue();
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<LambdaQueryWrapper<ExecutionLogEntity>> captor =
+                ArgumentCaptor.forClass(LambdaQueryWrapper.class);
+        verify(executionLogMapper).selectCount(captor.capture());
+        assertThat(captor.getValue().getSqlSegment()).contains("task_id", "status");
+    }
+
+    @Test
+    void existsRunningIsFalseWhenNothingIsRunning() {
+        when(executionLogMapper.selectCount(any())).thenReturn(0L);
+
+        assertThat(executionService.existsRunning(1L)).isFalse();
+    }
+
+    @Test
+    void finishIfRunningReportsThatStateActuallyChanged() {
+        ExecutionLogEntity execution = runningExecution(114L);
+        when(executionLogMapper.update(isNull(), any())).thenReturn(1);
+
+        assertThat(executionService.finishIfRunning(execution, ExecutionStatus.SUCCESS, 12L, null, "ok"))
+                .isTrue();
+    }
+
+    @Test
+    void finishIfRunningReportsNoTransitionWhenRecordAlreadyFinalized() {
+        // 重复投递的结果消息：记录已经不是 RUNNING，UPDATE 影响 0 行，
+        // 调用方据此知道"这次没有真的收尾"，也不会重复发失败事件。
+        ExecutionLogEntity execution = runningExecution(115L);
+        when(executionLogMapper.update(isNull(), any())).thenReturn(0);
+
+        assertThat(executionService.finishIfRunning(execution, ExecutionStatus.SUCCESS, 12L, null, "ok"))
+                .isFalse();
+    }
+
     @SuppressWarnings("unchecked")
     private LambdaUpdateWrapper<ExecutionLogEntity> captureUpdate() {
         ArgumentCaptor<Wrapper<ExecutionLogEntity>> captor = ArgumentCaptor.forClass(Wrapper.class);

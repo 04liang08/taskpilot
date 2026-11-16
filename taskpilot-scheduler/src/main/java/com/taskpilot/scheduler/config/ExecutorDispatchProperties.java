@@ -15,7 +15,9 @@ public class ExecutorDispatchProperties {
     private int connectTimeoutMs = 3000;
 
     /**
-     * 未指定任务超时时间时使用的读超时。
+     * 读超时。
+     * <p>第 4 周起执行接口只回 ACK（受理与否），回包很快，5 秒足够；
+     * 任务本身跑多久由执行器管，超时也由执行器判定并上报。</p>
      */
-    private int readTimeoutMs = 65000;
+    private int readTimeoutMs = 5000;
 }

@@ -1,7 +1,8 @@
 package com.taskpilot.scheduler.service;
 
+import com.taskpilot.common.dto.ExecuteAck;
 import com.taskpilot.common.dto.ExecuteRequest;
-import com.taskpilot.common.dto.ExecuteResult;
+import com.taskpilot.common.enums.ExecutionStatus;
 import com.taskpilot.common.enums.TaskStatus;
 import com.taskpilot.common.enums.TriggerType;
 import com.taskpilot.common.exception.BizException;
@@ -15,12 +16,10 @@ import com.taskpilot.scheduler.entity.TaskEntity;
 import com.taskpilot.scheduler.leader.LeaderContext;
 import com.taskpilot.scheduler.leader.LeaderStateService;
 import com.taskpilot.scheduler.shard.ShardAllocatorRegistry;
-import com.taskpilot.scheduler.shard.ShardFailedEvent;
 import com.taskpilot.scheduler.support.ExecutionKeys;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
-import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.core.task.TaskRejectedException;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.stereotype.Service;
@@ -33,15 +32,14 @@ import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.UUID;
 
 /**
  * 手动触发编排：校验任务 -> 选择在线执行器 -> 落 RUNNING 记录 -> 调用执行器 -> 落终态。
- * <p>第 1 周同步调用、不重试；失败直接记录，重试在第 3 周实现。</p>
+ * <p>第 4 周起派发变成"快回包"：执行器立即回 ACK，结果经 RabbitMQ 异步回传，
+ * 终态由结果消费者落（见 {@link ResultProcessor}）。</p>
  */
 @Service
 public class TriggerService {
@@ -56,13 +54,8 @@ public class TriggerService {
     private final ShardAllocatorRegistry shardAllocatorRegistry;
     private final ThreadPoolTaskExecutor triggerExecutor;
     private final ThreadPoolTaskExecutor shardExecutor;
-    private final ApplicationEventPublisher eventPublisher;
+    private final ResultProcessor resultProcessor;
     private final AtomicInteger roundRobin = new AtomicInteger();
-    /**
-     * 同一任务不允许并发执行。手动触发与定时触发共用这把锁。
-     * <p>只保证单实例内不并发；集群内的重复触发由第 2 周的领导选举兜底。</p>
-     */
-    private final Set<Long> runningTasks = ConcurrentHashMap.newKeySet();
 
     public TriggerService(TaskService taskService,
                           ExecutorService executorService,
@@ -72,7 +65,7 @@ public class TriggerService {
                           ShardAllocatorRegistry shardAllocatorRegistry,
                           @Qualifier("triggerExecutor") ThreadPoolTaskExecutor triggerExecutor,
                           @Qualifier("shardExecutor") ThreadPoolTaskExecutor shardExecutor,
-                          ApplicationEventPublisher eventPublisher) {
+                          ResultProcessor resultProcessor) {
         this.taskService = taskService;
         this.executorService = executorService;
         this.executionService = executionService;
@@ -81,7 +74,7 @@ public class TriggerService {
         this.shardAllocatorRegistry = shardAllocatorRegistry;
         this.triggerExecutor = triggerExecutor;
         this.shardExecutor = shardExecutor;
-        this.eventPublisher = eventPublisher;
+        this.resultProcessor = resultProcessor;
     }
 
     /**
@@ -116,14 +109,7 @@ public class TriggerService {
                                     TriggerType triggerType,
                                     LeaderContext leaderContext,
                                     LocalDateTime scheduledTime) {
-        if (!runningTasks.add(taskId)) {
-            throw new BizException(ErrorCode.CONFLICT, "任务正在执行中，请稍后再试: " + taskId);
-        }
-        try {
-            return executeTrigger(taskId, triggerType, leaderContext, scheduledTime);
-        } finally {
-            runningTasks.remove(taskId);
-        }
+        return executeTrigger(taskId, triggerType, leaderContext, scheduledTime);
     }
 
     private TriggerResult executeTrigger(Long taskId,
@@ -133,6 +119,17 @@ public class TriggerService {
         TaskEntity task = taskService.get(taskId);
         if (task.getStatus() != TaskStatus.ENABLED) {
             throw new BizException(ErrorCode.BAD_REQUEST, "任务未启用，无法触发: " + taskId);
+        }
+        // 同一任务不允许并发执行。
+        //
+        // 第 4 周起这里查 DB 而不是查内存锁：触发变成异步之后（结果经 RabbitMQ 回传），
+        // doTrigger 秒回、进程内的锁立刻释放，防并发就失效了；而且集群里别的实例
+        // 根本看不到那把锁。查 DB 才是集群口径。
+        //
+        // 已知竞态：check 与 insert 之间还有毫秒级窗口，两个实例同时通过检查时
+        // 仍可能各建一条记录。重复落库由幂等键 + uk_execution_key 兜住（ADR-017）。
+        if (executionService.existsRunning(taskId)) {
+            throw new BizException(ErrorCode.CONFLICT, "任务正在执行中，请稍后再试: " + taskId);
         }
         // fencing 校验：锁过期但仍以为自己 leader 的实例，写库时会被这里拒绝。
         if (leaderContext.fenced() && !leaderStateService.checkFence(leaderContext.fencingToken())) {
@@ -240,7 +237,8 @@ public class TriggerService {
         } catch (TaskRejectedException e) {
             // 分片池满了：这个分片直接失败，不影响其他分片。
             return CompletableFuture.completedFuture(
-                    executionService.markFailed(created.entity(), "分片执行线程池已满"));
+                    resultProcessor.processDispatchFailure(created.entity(), ExecutionStatus.FAILED,
+                            "分片执行线程池已满"));
         }
     }
 
@@ -255,7 +253,15 @@ public class TriggerService {
     }
 
     /**
-     * 调用执行器并落终态。分片与单分片共用这条路径，失败只影响当前分片。
+     * 调用执行器并落终态。
+     *
+     * <p>第 4 周起这里只做"派发"：执行器立即回 ACK（受理与否），
+     * 真正的执行结果由执行器经 RabbitMQ 回传，这里不等待。
+     * 所以：</p>
+     * <ul>
+     *   <li>受理成功 → 记录保持 RUNNING，等结果消息来收尾；</li>
+     *   <li>受理失败 / 连不上 / ACK 超时 → 调度侧自己把记录收成终态并发失败事件。</li>
+     * </ul>
      * <p>失败转移（换执行器重试）也复用这个方法。</p>
      */
     public ExecutionLogEntity dispatch(ExecutionLogEntity execution,
@@ -272,57 +278,49 @@ public class TriggerService {
                 task.getTimeoutSeconds());
 
         try {
-            ExecuteResult result = executorClient.execute(executor.getAddress(), request);
-            ExecutionLogEntity finished = executionService.complete(execution, result);
-            log.info("{} finished: taskId={}, executionId={}, shard={}/{}, executor={}, status={}, durationMs={}",
-                    triggerType == TriggerType.CRON ? "scheduled trigger" : "manual trigger",
-                    task.getId(), execution.getId(), execution.getShardIndex(), execution.getShardTotal(),
-                    executor.getAddress(), finished.getStatus(), finished.getDurationMs());
-            if (!result.success()) {
-                // 调用成功但处理器执行失败（success=false）——这才是最典型的可重试场景。
-                // 只在"调用异常"时重试是不够的：处理器抛异常同样应该退避重试。
-                publishShardFailed(finished);
+            ExecuteAck ack = executorClient.execute(executor.getAddress(), request);
+            if (ack.accepted()) {
+                // 执行器已受理：结果稍后经 RabbitMQ 回传，记录保持 RUNNING。
+                log.info("{} dispatched: taskId={}, executionId={}, shard={}/{}, executor={}",
+                        triggerType == TriggerType.CRON ? "scheduled trigger" : "manual trigger",
+                        task.getId(), execution.getId(), execution.getShardIndex(), execution.getShardTotal(),
+                        executor.getAddress());
+                return execution;
             }
-            return finished;
+            // 执行器现在接不了（线程池满等）：直接失败，走原来的重试 / 失败转移链路。
+            log.warn("{} rejected by executor: taskId={}, executionId={}, reason={}",
+                    triggerType == TriggerType.CRON ? "scheduled trigger" : "manual trigger",
+                    task.getId(), execution.getId(), ack.rejectReason());
+            return resultProcessor.processDispatchFailure(execution, ExecutionStatus.FAILED,
+                    "执行器拒绝执行: " + ack.rejectReason());
         } catch (ResourceAccessException e) {
             if (isTimeout(e)) {
-                ExecutionLogEntity finished = executionService.markTimeout(execution, "调用执行器超时: " + rootMessage(e));
-                log.warn("trigger timeout: taskId={}, executionId={}, executor={}, reason={}",
+                log.warn("dispatch timeout: taskId={}, executionId={}, executor={}, reason={}",
                         task.getId(), execution.getId(), executor.getAddress(), rootMessage(e));
-                publishShardFailed(finished);
-                return finished;
+                return resultProcessor.processDispatchFailure(execution, ExecutionStatus.TIMEOUT,
+                        "调用执行器超时: " + rootMessage(e));
             }
-            ExecutionLogEntity finished = executionService.markFailed(execution, "调用执行器失败: " + rootMessage(e));
-            log.warn("trigger failed: taskId={}, executionId={}, executor={}, reason={}",
+            log.warn("dispatch failed: taskId={}, executionId={}, executor={}, reason={}",
                     task.getId(), execution.getId(), executor.getAddress(), rootMessage(e));
-            publishShardFailed(finished);
-            return finished;
+            return resultProcessor.processDispatchFailure(execution, ExecutionStatus.FAILED,
+                    "调用执行器失败: " + rootMessage(e));
         } catch (RestClientException e) {
-            ExecutionLogEntity finished = executionService.markFailed(execution, "调用执行器失败: " + rootMessage(e));
-            log.warn("trigger failed: taskId={}, executionId={}, executor={}, reason={}",
+            log.warn("dispatch failed: taskId={}, executionId={}, executor={}, reason={}",
                     task.getId(), execution.getId(), executor.getAddress(), rootMessage(e));
-            publishShardFailed(finished);
-            return finished;
+            return resultProcessor.processDispatchFailure(execution, ExecutionStatus.FAILED,
+                    "调用执行器失败: " + rootMessage(e));
         } catch (Exception e) {
-            ExecutionLogEntity finished = executionService.markFailed(execution, "触发异常: " + rootMessage(e));
-            log.error("trigger error: taskId={}, executionId={}", task.getId(), execution.getId(), e);
-            publishShardFailed(finished);
-            return finished;
+            log.error("dispatch error: taskId={}, executionId={}", task.getId(), execution.getId(), e);
+            return resultProcessor.processDispatchFailure(execution, ExecutionStatus.FAILED,
+                    "触发异常: " + rootMessage(e));
         }
     }
 
     /**
-     * 发布分片失败事件，交给失败转移逻辑判断要不要换执行器重试。
-     * <p>只有自动触发（cron）才做失败转移：手动触发失败就是失败，由用户决定要不要重来。</p>
+     * 判断是不是读超时。
+     * <p>注意：第 4 周起"任务超时"由执行器判定并上报，这里的超时只指
+     * "连执行器的 ACK 都没拿到"（网络/进程层面）。</p>
      */
-    private void publishShardFailed(ExecutionLogEntity execution) {
-        if (execution == null || execution.getTriggerType() != TriggerType.CRON) {
-            return;
-        }
-        eventPublisher.publishEvent(
-                new ShardFailedEvent(execution.getId(), execution.getTaskId(), execution.getExecutorId()));
-    }
-
     private boolean isTimeout(Throwable throwable) {
         Throwable cause = throwable;
         while (cause != null) {
