@@ -45,9 +45,11 @@ public class ExecutionService {
             "next_retry_time = CASE WHEN trigger_type = 'CRON' THEN NOW(3) ELSE NULL END";
 
     private final ExecutionLogMapper executionLogMapper;
+    private final DeadLetterService deadLetterService;
 
-    public ExecutionService(ExecutionLogMapper executionLogMapper) {
+    public ExecutionService(ExecutionLogMapper executionLogMapper, DeadLetterService deadLetterService) {
         this.executionLogMapper = executionLogMapper;
+        this.deadLetterService = deadLetterService;
     }
 
     /**
@@ -194,13 +196,25 @@ public class ExecutionService {
 
     /**
      * 重试预算耗尽：清掉下次重试时间，这条记录就是终态（死信）了。
+     * <p>顺带落一条死信记录并广播告警：这条执行记录再也不会自己活过来，
+     * 需要有人来看一眼。死信按 execution_id 幂等，重复调用不会堆重复行。</p>
      */
     public void markRetryExhausted(ExecutionLogEntity execution) {
+        markRetryExhausted(execution, "重试预算耗尽");
+    }
+
+    /**
+     * 重试预算耗尽（或任务已停用）：清掉下次重试时间并落死信。
+     *
+     * @param reason 死信原因，会记进 tp_dead_letter.last_error
+     */
+    public void markRetryExhausted(ExecutionLogEntity execution, String reason) {
         executionLogMapper.update(null, Wrappers.<ExecutionLogEntity>lambdaUpdate()
                 .eq(ExecutionLogEntity::getId, execution.getId())
                 .in(ExecutionLogEntity::getStatus, ExecutionStatus.FAILED, ExecutionStatus.TIMEOUT)
                 .set(ExecutionLogEntity::getNextRetryTime, null));
         execution.setNextRetryTime(null);
+        deadLetterService.record(execution, reason);
     }
 
     /**

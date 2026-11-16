@@ -120,7 +120,7 @@ public class ShardFailoverService {
             TaskEntity task = taskService.get(execution.getTaskId());
             if (task == null || task.getStatus() != TaskStatus.ENABLED) {
                 // 任务没了/停用了：没有重试的可能，落终态，别让兜底扫描反复捞回来。
-                executionService.markRetryExhausted(execution);
+                executionService.markRetryExhausted(execution, "任务已停用或被删除，不再重试");
                 return;
             }
             if (execution.getStatus() == ExecutionStatus.RUNNING) {
@@ -148,7 +148,7 @@ public class ShardFailoverService {
                 // 不再换机重试，也不会被兜底扫描反复捞回来。
                 log.warn("shard failover skipped, no retry budget left: executionId={}, retryCount={}, maxRetry={}",
                         execution.getId(), execution.getRetryCount(), task.getRetryMax());
-                executionService.markRetryExhausted(execution);
+                executionService.markRetryExhausted(execution, "重试预算耗尽");
                 return;
             }
             List<ExecutorEntity> candidates = executorService.listOnline().stream()

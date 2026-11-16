@@ -1,8 +1,9 @@
 -- TaskPilot 初始化脚本（MySQL 8）：全新安装只跑本脚本。
--- 本文件已包含 Week 1~3 的全部表与列：tp_leader、tp_execution_log 的
--- fencing_token / leader_instance / next_retry_time / uk_execution_key / retry_count 等。
--- 02-week2-leader.sql 与 03-week3-retry.sql 是给「旧版本数据库」升级用的增量脚本：
--- 在全新库上再执行它们会报 table already exists / Duplicate column name。
+-- 本文件已包含 Week 1~4 的全部表与列：tp_leader、tp_execution_log 的
+-- fencing_token / leader_instance / next_retry_time / uk_execution_key / retry_count 等，
+-- 以及第 4 周的 tp_dead_letter（死信表）。
+-- 02-week2-leader.sql、03-week3-retry.sql、04-week4-deadletter.sql 是给「旧版本数据库」
+-- 升级用的增量脚本：在全新库上再执行它们会报 table already exists / Duplicate column name。
 -- 时区约定：容器/连接/JVM 统一 Asia/Shanghai，时间字段使用 DATETIME(3)。
 
 CREATE DATABASE IF NOT EXISTS taskpilot
@@ -100,3 +101,24 @@ CREATE TABLE IF NOT EXISTS tp_leader (
     ON UPDATE CURRENT_TIMESTAMP(3),
   PRIMARY KEY (id)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COMMENT = '调度集群 leader 与 fencing token';
+
+-- 死信表：重试预算耗尽、或结果消息处理失败（毒消息）的执行记录。
+-- execution_id 唯一：同一条执行记录只落一行死信，重复上报不会堆重复行。
+CREATE TABLE IF NOT EXISTS tp_dead_letter (
+  id BIGINT NOT NULL AUTO_INCREMENT COMMENT '主键',
+  execution_id BIGINT NOT NULL COMMENT '执行记录 ID；同一条记录只落一行死信',
+  task_id BIGINT NOT NULL COMMENT '任务 ID',
+  task_name VARCHAR(128) NOT NULL COMMENT '任务名称',
+  shard_index INT NOT NULL DEFAULT 0 COMMENT '分片号',
+  shard_total INT NOT NULL DEFAULT 1 COMMENT '分片总数',
+  retry_count INT NOT NULL DEFAULT 0 COMMENT '进入死信时已重试次数',
+  last_error TEXT NULL COMMENT '最后一次失败原因',
+  dead_time DATETIME(3) NOT NULL COMMENT '进入死信的时间',
+  create_time DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  update_time DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3)
+    ON UPDATE CURRENT_TIMESTAMP(3),
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_dead_execution (execution_id),
+  KEY idx_task (task_id),
+  KEY idx_dead_time (dead_time)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COMMENT = '死信记录：重试耗尽或结果消息处理失败';

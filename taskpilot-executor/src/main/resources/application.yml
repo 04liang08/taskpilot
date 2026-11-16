@@ -14,9 +14,6 @@ spring:
     virtual-host: ${TASKPILOT_RABBITMQ_VHOST:/}
     # 发布确认：结果消息必须确认落到 broker，否则调度中心收不到结果。
     publisher-confirm-type: correlated
-    publisher-returns: true
-    template:
-      mandatory: true
     listener:
       simple:
         # broker 不可达 / 队列还不存在时不能把应用启动卡死。

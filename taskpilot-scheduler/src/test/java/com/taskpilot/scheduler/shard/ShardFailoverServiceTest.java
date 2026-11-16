@@ -224,7 +224,7 @@ class ShardFailoverServiceTest {
 
         service.failover(execution);
 
-        verify(executionService).markRetryExhausted(execution);
+        verify(executionService).markRetryExhausted(eq(execution), eq("重试预算耗尽"));
         verify(executionService, never()).claimForRetry(any(), any());
         verify(triggerService, never()).dispatch(any(), any(), any(), any());
     }
@@ -239,7 +239,7 @@ class ShardFailoverServiceTest {
 
         service.failover(execution);
 
-        verify(executionService).markRetryExhausted(execution);
+        verify(executionService).markRetryExhausted(eq(execution), eq("任务已停用或被删除，不再重试"));
         verify(triggerService, never()).dispatch(any(), any(), any(), any());
     }
 

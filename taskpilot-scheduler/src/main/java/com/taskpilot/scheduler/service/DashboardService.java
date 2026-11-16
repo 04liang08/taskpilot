@@ -5,11 +5,13 @@ import com.taskpilot.common.enums.ExecutionStatus;
 import com.taskpilot.common.enums.ExecutorStatus;
 import com.taskpilot.common.enums.TaskStatus;
 import com.taskpilot.scheduler.dto.DashboardSummary;
+import com.taskpilot.scheduler.entity.DeadLetterEntity;
 import com.taskpilot.scheduler.entity.ExecutionLogEntity;
 import com.taskpilot.scheduler.entity.ExecutorEntity;
 import com.taskpilot.scheduler.entity.LeaderEntity;
 import com.taskpilot.scheduler.entity.TaskEntity;
 import com.taskpilot.scheduler.leader.LeaderStateService;
+import com.taskpilot.scheduler.mapper.DeadLetterMapper;
 import com.taskpilot.scheduler.mapper.ExecutionLogMapper;
 import com.taskpilot.scheduler.mapper.ExecutorMapper;
 import com.taskpilot.scheduler.mapper.TaskMapper;
@@ -25,15 +27,18 @@ public class DashboardService {
     private final TaskMapper taskMapper;
     private final ExecutorMapper executorMapper;
     private final ExecutionLogMapper executionLogMapper;
+    private final DeadLetterMapper deadLetterMapper;
     private final LeaderStateService leaderStateService;
 
     public DashboardService(TaskMapper taskMapper,
                             ExecutorMapper executorMapper,
                             ExecutionLogMapper executionLogMapper,
+                            DeadLetterMapper deadLetterMapper,
                             LeaderStateService leaderStateService) {
         this.taskMapper = taskMapper;
         this.executorMapper = executorMapper;
         this.executionLogMapper = executionLogMapper;
+        this.deadLetterMapper = deadLetterMapper;
         this.leaderStateService = leaderStateService;
     }
 
@@ -55,6 +60,8 @@ public class DashboardService {
                 .ge(ExecutionLogEntity::getCreateTime, todayStart));
         long runningCount = executionLogMapper.selectCount(Wrappers.<ExecutionLogEntity>lambdaQuery()
                 .eq(ExecutionLogEntity::getStatus, ExecutionStatus.RUNNING));
+        // 死信：重试耗尽或结果消息处理失败的记录，需要人来看一眼。
+        long deadLetterCount = deadLetterMapper.selectCount(Wrappers.<DeadLetterEntity>lambdaQuery());
 
         // 当前 leader 来自共享的 tp_leader，任何实例读到的都是集群视角。
         LeaderEntity leader = leaderStateService.currentLeader();
@@ -62,6 +69,6 @@ public class DashboardService {
         LocalDateTime leaderSince = leader == null ? null : leader.getLeaderTime();
 
         return new DashboardSummary(taskCount, enabledTaskCount, onlineExecutorCount,
-                todaySuccess, todayFailed, runningCount, leaderInstance, leaderSince);
+                todaySuccess, todayFailed, runningCount, deadLetterCount, leaderInstance, leaderSince);
     }
 }

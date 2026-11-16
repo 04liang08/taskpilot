@@ -42,6 +42,9 @@ class ExecutionServiceTest {
     @Mock
     private ExecutionLogMapper executionLogMapper;
 
+    @Mock
+    private DeadLetterService deadLetterService;
+
     @InjectMocks
     private ExecutionService executionService;
 
