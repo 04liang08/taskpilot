@@ -95,7 +95,9 @@ public class RetryService {
             return;
         }
         if (!executionService.canRetry(execution, task)) {
-            // 没有重试预算了：这条记录就是终态，等第 4 周的死信/告警。
+            // 没有重试预算了：这条记录就是终态。落死信并广播告警——
+            // 再也不会有人来救这条记录了，得让人知道。
+            executionService.markRetryExhausted(execution, "重试预算耗尽");
             log.warn("shard failed, no retry budget left: executionId={}, taskId={}, retryCount={}, maxRetry={}",
                     execution.getId(), task.getId(), execution.getRetryCount(), task.getRetryMax());
             return;

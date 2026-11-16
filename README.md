@@ -2,7 +2,8 @@
 
 分布式任务调度平台：**调度中心（scheduler）+ 执行器（executor）** 两段式架构。
 
-> 当前状态：第 3 周 Day 5 —— 分片并发、失败转移、指数退避重试、确定性幂等键与端到端验收已就绪；第 3 周评审提出的 P1/P2 缺陷（0.1~1.5）已修复。
+> 当前状态：第 4 周 Day 1 —— 执行结果改走 RabbitMQ 异步上报（调度中心只拿 ACK，结果经 MQ 回传），
+> 手动触发统一返回 `RUNNING` 由页面轮询；重试耗尽与毒消息落死信表并广播告警。第 1~3 周能力（分片并发、失败转移、退避重试、幂等）均已就绪。
 
 ## 1. 它解决什么问题
 
@@ -51,6 +52,7 @@
 - Spring Cloud 2023.0.1 + Spring Cloud Alibaba 2023.0.1.0（Nacos 可选）
 - MyBatis-Plus 3.5.7 + MySQL 8
 - Redis / Redisson（第 2 周起）
+- RabbitMQ 3（第 4 周起：结果异步上报 + 死信告警）
 - Docker Compose、JMeter、GitHub Actions（第 4 周）
 - springdoc-openapi 2.5.0
 
@@ -150,9 +152,12 @@ curl "http://localhost:8080/api/v1/executions?page=1&size=20"
 curl "http://localhost:8080/api/v1/executions?page=1&size=20&taskId=1&status=SUCCESS"
 ```
 
-- 触发前先插入 `RUNNING` 记录，调用结束后更新为 `SUCCESS` / `FAILED` / `TIMEOUT`。
+- 触发前先插入 `RUNNING` 记录；**第 4 周起派发立即返回**（接口响应里状态是 `RUNNING`），
+  执行器跑完把结果经 RabbitMQ 回传后才更新为 `SUCCESS` / `FAILED` / `TIMEOUT`，
+  轮询 `GET /api/v1/executions/{id}` 到终态即可。
 - 没有在线执行器时返回 `50001`，同时保留一条 `FAILED` 执行记录。
 - 手动触发每次生成 UUID `execution_key`，允许重复触发。
+- 同一任务不允许并发执行：手动触发撞上定时触发（或上一次还没跑完）会返回 `40900`。
 
 定时触发（时间轮，1 秒粒度）：
 
@@ -212,6 +217,19 @@ powershell -ExecutionPolicy Bypass -File scripts/verify-week3.ps1 -MysqlPort 330
 双 scheduler + 双 executor，覆盖：① 分片并发计时；② 杀执行器后失败转移成功且记录指向新执行器；③ 退避重试时序（5s→10s）；④ 同一计划时间重复触发被幂等去重；⑤ 广播任务每台执行器都执行；⑥ 改 cron 后触发频率不翻倍。实测数字写在 `.tmp/verify-week3/results.json`。
 
 参考实测（本机双 scheduler + 双 executor，两次完整运行）：4 分片各 1 秒 → 串行估算 4000 ms、并发 **1266~1268 ms（3.15~3.16x）**；退避间隔 **5.1s / 10.3s**；杀执行器到失败转移重跑成功 **19~22s**；广播 2 分片 × 2 执行器，每个计划时间 4 条记录；改 cron 后 22 秒内新增 2~3 次（10s 周期理论 2 次，未翻倍）。
+
+第 4 周的异步链路另有一个验收脚本（同样按端口定位进程、日志放 `.tmp/`、退出码 0/1 可接 CI）：
+
+```powershell
+# 需要先起 RabbitMQ：docker compose -f deploy/docker-compose.yml up -d rabbitmq
+powershell -ExecutionPolicy Bypass -File scripts/verify-week4.ps1
+# 本机 MySQL 不在默认 3306 端口时
+powershell -ExecutionPolicy Bypass -File scripts/verify-week4.ps1 -MysqlPort 3307
+```
+
+双 scheduler + 双 executor，覆盖：① cron 长任务（sleep 15s）RUNNING → SUCCESS 经 MQ 落库；② 手动触发 < 2s 返回 `RUNNING`、轮询到终态；③ 杀执行器后异步链路 failover 成功且记录指向新执行器；④ 重试预算耗尽 → `tp_dead_letter` 有行 + 告警日志；⑤ 重复投递同一条结果消息 → 终态只写一次。实测数字写在 `.tmp/verify-week4/results.json`。
+
+参考实测（本机双 scheduler + 双 executor + RabbitMQ 3.13）：长任务（sleep 15s）执行耗时 **15009 ms**，执行期间调度中心健康检查 **10 ms** 响应；手动触发接口 **52 ms** 返回 `RUNNING`，轮询到 SUCCESS 耗时 15006 ms；杀执行器到异步链路 failover 重跑成功 **23 s**，记录 executor 已改指向存活执行器、`retry_count=1`；重试预算耗尽后 `tp_dead_letter` 落 1 行，概览死信数同步为 1。
 
 相关入口：
 
@@ -283,6 +301,9 @@ docker exec -it taskpilot-mysql mysql -utaskpilot -ptaskpilot \
 - **幂等**：定时触发的 `execution_key` 是确定性的 `taskId:计划触发时间:分片号`（如 `3:20261115161500:0`），同一计划时间点的重复触发会被 `uk_execution_key` 挡下；广播策略下一个分片有多台目标执行器，键追加 `:执行器Id`（**单目标分片的键保持不变**）；手动触发用 UUID，允许重复。
 - 分工：原执行器不可用 → 换机重试（立即）；原执行器还在（处理器抛异常）→ 原地退避重试。
 - **边界（别误解）**：fencing 是定时触发入口的一次预检，不是写库层的全局强制；执行器侧没有按 `executionId` 去重。整体语义是**至少一次 + 业务幂等**，不是"保证不执行两遍"。
+- **第 4 周起**：执行器只回 ACK，结果经 RabbitMQ 异步回传（`taskpilot.execution.results`）。
+  结果消息是**至少一次**投递，重复投递靠落终态的 `status=RUNNING` 前置条件做到幂等（终态只写一次）。
+  重试预算耗尽或结果消息成了毒消息 → 落 `tp_dead_letter`（按 `execution_id` 唯一）+ 广播告警到 `taskpilot.alerts`。
 
 执行器注册表：
 
@@ -297,7 +318,7 @@ docker exec -it taskpilot-mysql mysql -utaskpilot -ptaskpilot \
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| POST | `/api/v1/executor/execute` | 调度中心调用，按 `handlerName` 执行 |
+| POST | `/api/v1/executor/execute` | 调度中心调用，按 `handlerName` 执行；**只回 ACK（受理与否）**，结果经 RabbitMQ 回传 |
 | GET | `/api/v1/executor/handlers` | 查看已注册处理器 |
 
 内置处理器：`demoHandler`（回显参数）、`sleepHandler`（演示耗时/超时）、`httpHandler`（GET 外部 URL）。
@@ -329,6 +350,11 @@ docker exec -it taskpilot-mysql mysql -utaskpilot -ptaskpilot \
 - [x] Day 3：失败转移（执行器下线后分片重新分配并重试，复用原记录 + 原子抢占）
 - [x] Day 4：确定性幂等键（`taskId:计划时间:分片号` + 唯一索引兜底）+ 指数退避重试
 - [x] Day 5：端到端验收（`scripts/verify-week3.ps1`）+ 文档 + 评审缺陷修复（0.1~1.5）
+
+**第 4 周**
+
+- [x] Day 1：结果异步上报（RabbitMQ：ACK + 结果消息 + DLX）+ 手动触发统一异步 + 死信表与告警广播 + `scripts/verify-week4.ps1`
+- [ ] Day 2~5：鉴权、压测（JMeter）、CI、指标（Micrometer）
 
 ## 8. 文档索引
 
@@ -367,9 +393,10 @@ docker exec -it taskpilot-mysql mysql -utaskpilot -ptaskpilot \
 | ~~心跳恢复窗口内误发下线事件~~ | **已修复（1.3）**：逐行条件更新，affected = 1 才发事件 | — |
 | ~~leader 优雅让位失效 / finish 整实体写回~~ | **已修复（1.4）**：关闭时按归属 `forceUnlock()`；`finish` 定向列更新并带状态前置条件 | — |
 | ~~createFailed 标错 triggerType / MANUAL 被转移 / 死配置~~ | **已修复（1.5）**：传入真实 triggerType、MANUAL 不参与转移、删除 `lease-seconds` | — |
-| 失败转移有延迟 | 最坏要等 30 秒心跳超时才判定下线（双实例实测接管 19~22s） | Week 4：执行器主动上报下线 / 调小心跳超时 |
-| 没有死信与告警 | 重试耗尽的失败只有日志和一条 FAILED 记录 | Week 4：死信表 + MQ 告警 |
-| 结果上报仍是同步 HTTP 回包 | 手动触发会同步等待执行结果；定时触发已异步化，但结果仍靠同步回包 | Week 4：MQ / 回调上报结果 |
+| ~~失败转移有延迟~~ | 最坏要等 30 秒心跳超时才判定下线（双实例实测接管 19~22s） | Week 4：执行器主动上报下线 / 调小心跳超时 |
+| ~~没有死信与告警~~ | **已修复（4.5）**：重试耗尽与毒消息落 `tp_dead_letter`（按 `execution_id` 幂等），并广播到 `taskpilot.alerts` fanout，webhook 可选 | — |
+| ~~结果上报仍是同步 HTTP 回包~~ | **已修复（4.2/4.3）**：执行器只回 ACK，结果经 RabbitMQ 异步回传；手动触发统一返回 `RUNNING`，页面轮询终态 | — |
+| 执行器结果回传依赖 RabbitMQ | broker 不可达时应用仍能启动，但结果回不来，要等僵尸回收（`timeout + grace`）兜底标 TIMEOUT | ADR-019 已如实记录；保持现状 |
 | 执行器接口无鉴权 | 仅限内网演示 | Week 4：简单 token |
 | 没有压测数据 | 简历里不能写吞吐/延迟数字 | Week 4：JMeter 实测 |
 

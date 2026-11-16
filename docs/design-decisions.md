@@ -296,4 +296,91 @@ UPDATE tp_execution_log
 
 - 重试预算会被失败转移消耗掉：换机重试也算一次重试。
 - 退避在内存里调度，精度受 JVM 调度影响；真正的到期时间以 `next_retry_time` 为准。
-- 超过 `retry_max` 的失败目前只有日志和一条 FAILED 记录，**没有告警也没有死信表**——第 4 周做 MQ 告警时补上。
+- 超过 `retry_max` 的失败在第 3 周只有日志和一条 FAILED 记录；第 4 周补上了死信表与告警（ADR-019）。
+
+## ADR-019：结果异步上报走 RabbitMQ，手动触发也统一异步
+
+**背景**：第 3 周的执行链路是**同步 HTTP**：调度中心调执行器 → 等执行器跑完（最长 `timeout_seconds + 5s`）→ 拿结果落库。三个问题：
+
+1. **调度线程被占住**：一个 15 秒的任务就把触发线程占 15 秒，定时触发的节奏会被拖歪；
+2. **手动触发要干等**：接口调用方（页面 / curl）必须等到任务跑完，页面只能转圈；
+3. **超时归属混乱**：调度中心读超时、僵尸回收、执行器自己的超时判定，三处各判一次，语义打架。
+
+### 决策一：通道选 RabbitMQ
+
+**决策**：用 RabbitMQ 3 做执行结果的回传通道（`taskpilot.execution.results` 交换机 + `.q` 队列 + DLX + `taskpilot.alerts` fanout）。
+
+**为什么是 RabbitMQ，不是别的**：
+
+| 候选 | 为什么没选 |
+|---|---|
+| RocketMQ | 能力更强（事务消息、延迟消息、顺序消息），但 footprint 大：Broker + NameServer 两套进程，运维和内存开销都明显更高。本项目只需要"一条结果消息 + 死信 + 一条告警"，用不上它的高级特性。 |
+| Redis Stream | 轻、已经在项目里（领导选举在用）。但它是"Redis 的一个数据结构"，不是消息中间件：没有交换机 / 绑定 / DLX 这套路由模型，死信得自己用消费组实现，投影状态也得自己管。放在简历里"消息中间件"这一栏，说服力不如一个真正的 MQ。 |
+| Kafka | 吞吐强，但这个场景是低频、单条结果消息，用 Kafka 是杀鸡用牛刀；而且它是日志型 MQ，单条消息的"处理完就删"语义反而别扭。 |
+
+RabbitMQ 正好卡在中间：单进程、镜像小、有 exchange / queue / DLX / publisher confirm 这些**正好用得上**的能力。
+
+**代价**：
+
+- 多了一个必须起来的中间件（第 2 周是 Redis，第 4 周是 RabbitMQ）。**broker 不可达时应用仍能启动**（懒连接 + `missing-queues-fatal=false`），但结果回不来，只能靠调度中心的僵尸回收兜底。
+- 发布确认只能证明 broker 收到了消息，证明不了它被路由到了队列；路由失败靠日志和僵尸回收兜底。
+
+### 决策二：拓扑与语义
+
+```text
+执行器 --(persistent + publisher confirm)--> taskpilot.execution.results (direct)
+                                                │ execution-result
+                                                ▼
+                                    taskpilot.execution.results.q
+                                                │ 消费失败 nack(requeue=false)
+                                                ▼
+                                       taskpilot.execution.dlx (direct)
+                                                │ execution-dead
+                                                ▼
+                                        taskpilot.execution.dead  --> 死信表 + 告警
+
+调度中心 --(fanout)--> taskpilot.alerts --> taskpilot.alerts.webhook --> webhook
+```
+
+- 交换机与队列全部**持久化**：broker 重启后拓扑和未消费的消息都还在。
+- 结果消息带**发布确认**：没确认就不算发出去，重发 3 次（退避），仍失败只记 error 日志。
+  **不做本地磁盘队列**：调度中心的僵尸回收是最终兜底（见下）。
+- 消费端**手动 ACK**：处理成功 → `basicAck`；处理失败 → `basicNack(requeue=false)` → 进死信队列。
+  ACK 发生在事务提交之后，所以不会出现"ack 了但数据没落库"。
+- **至少一次 + DB 幂等**：结果消息可能重复投递。落终态的 SQL 带 `status = RUNNING` 前置条件，
+  重复投递只会命中 0 行、不会二次覆写终态，天然幂等。
+
+### 决策三：手动触发也统一异步
+
+**决策**：手动触发接口立即返回 `RUNNING` 的执行记录，页面轮询 `GET /api/v1/executions/{id}` 到终态。**不再保留同步等待路径**。
+
+**原因**：
+
+- 两条路径（同步 / 异步）会各自漂移，最后变成两套超时语义、两套错误处理。统一成一条更省心。
+- 手动触发的"正在执行"状态本来就需要在页面上看得见——异步之后它反而更直观（记录立刻变成 `RUNNING`）。
+
+**连带处理**：
+
+- **防并发从内存锁改成查 DB**：异步之后 `doTrigger` 秒回，进程内的锁立刻释放，防并发形同虚设；
+  而且集群里别的实例根本看不到那把锁。改成"触发前查 DB 有没有该任务的 RUNNING 记录"，
+  这才是集群口径。check-then-insert 之间还有毫秒级窗口，重复落库由幂等键（ADR-017）兜住。
+- **汇总状态要认 `RUNNING`**：`TriggerResult.of` 原来只检查 FAILED / TIMEOUT，
+  异步之后会把"还在跑"误汇总成 SUCCESS。
+
+### 决策四：超时归属执行器，僵尸回收兜底
+
+**决策**：任务超时由**执行器**判定并上报（执行器本来就有 `future.get(timeout)`）；
+调度中心不再靠读超时猜任务超时。调度中心的**僵尸回收**收紧成"ACK 之后结果没回来"的兜底：
+超过 `task.timeout_seconds + grace` 的 `RUNNING` 记录标成 **TIMEOUT**（不是 FAILED），
+并给定时触发的记录挂上 `next_retry_time`，由退避扫描 / 失败转移接手。
+
+**为什么标 TIMEOUT 而不是 FAILED**：这种情况多半是"跑太久"或"结果消息丢了"，
+不是"明确失败"。标 TIMEOUT 才和执行器上报的语义一致。
+
+**代价**：
+
+- 结果消息丢了要等 `timeout + grace`（默认 60s + 60s）才被发现，比同步版慢。
+- 执行器被强杀时在途任务的结果永远回不来，只能靠这条兜底。
+- 死信表 `tp_dead_letter` 按 `execution_id` 唯一：同一条执行记录只落一行。
+  "任务被停用"和"重试预算耗尽"都会落死信——前者是"这条记录再也不会被重试了"，
+  后者是"重试用完了"，都需要人看一眼。

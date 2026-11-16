@@ -34,7 +34,7 @@
 - 触发：手动触发 + 自实现时间轮的 cron 定时触发；第 2 周后半段接入领导选举。
 - 分片：按策略把一次触发拆成 N 个分片，每个分片一条执行记录、独立调度。
 - 执行器注册表：注册 / 心跳 / 超时下线；第 3 周扩展为分片与失败转移依据。
-- 执行记录：先落 `RUNNING` 再调用执行器，最终更新为 `SUCCESS/FAILED/TIMEOUT`。
+- 执行记录：先落 `RUNNING` 再派发，第 4 周起结果经 RabbitMQ 异步回来，最终更新为 `SUCCESS/FAILED/TIMEOUT`。
 - 管理端：REST API + `static/index.html` 极简演示页。
 
 ### executor
@@ -138,10 +138,10 @@ scheduler 启动
       原执行器仍在线   → 不转移，交给原地退避重试
       原执行器已下线   → 一条 UPDATE 原子抢占（claimForRetryOn），
                         同时把 executor_id / executor_address 改指向目标执行器
-                      → 复用同一条记录 dispatch（retry_count + 1）
+                      → 复用同一条记录 dispatch（retry_count + 1），结果同样经 MQ 回来
   → 原执行器在线的业务失败 → RetryService 按 interval × 2^已重试次数 退避，
     @Scheduled / retryScheduler 线程只负责读库与排队，真正执行提交 shardExecutor
-  → 重试预算耗尽 → 清掉 next_retry_time，落终态（死信；告警留到 Week 4）
+  → 重试预算耗尽 → 清掉 next_retry_time，落终态（死信表 + 告警）
 ```
 
 关键点：
@@ -154,7 +154,31 @@ scheduler 启动
 - `@Scheduled` 默认只有 1 个线程，已配 `spring.task.scheduling.pool.size=4`，
   且重试的同步 HTTP 调用全部下沉到分片线程池，健康检查与僵尸回收不会被拖住。
 
-### 3.7 幂等与 fencing 的边界
+### 3.7 异步结果上报（Week 4）
+
+```text
+调度中心 dispatch（快回包）
+  → POST /api/v1/executor/execute
+  → 执行器立即回 ACK（受理 / 拒绝），不等待执行结果
+  → 执行器在调度线程池里跑处理器（超时由执行器判）
+  → 跑完把结果消息发到 results 交换机（persistent + publisher confirm）
+  → 调度中心消费 results.q（手动 ACK）
+      处理成功 → 落终态（finish 带 status=RUNNING 前置条件）→ 提交事务 → basicAck
+      处理失败 → basicNack(requeue=false) → 进死信队列 → 落 tp_dead_letter + 广播告警
+```
+
+关键点：
+
+- **dispatch 不再等结果**：长任务不会占住调度线程，手动触发接口也能立刻返回 `RUNNING`。
+- **至少一次 + DB 幂等**：结果消息可能重复投递，落终态的 UPDATE 带 `status=RUNNING` 前置条件，
+  重复投递命中 0 行，终态只写一次。
+- **超时归属执行器**：任务超时由执行器判定并上报；调度中心的僵尸回收只兜底"ACK 之后结果没回来"，
+  超过 `task.timeout_seconds + grace` 的 `RUNNING` 标 `TIMEOUT` 并挂上 `next_retry_time`，
+  交给退避扫描 / 失败转移接手。
+- **broker 不可达时应用照常启动**（懒连接 + `missing-queues-fatal=false`），只是结果回不来，
+  由上面那条僵尸回收兜底。
+
+### 3.8 幂等与 fencing 的边界
 
 | 机制 | 实际作用范围 | 不做的事 |
 |---|---|---|
@@ -162,6 +186,7 @@ scheduler 启动
 | fencing token | **定时触发入口的一次预检**：写库前校验 `fencing_token <= 我的 token`，影响行数为 0 就拒绝本次触发 | 不是写库层的全局强制约束；已进入执行链路的写入不再逐条校验 token |
 | `uk_execution_key` 唯一索引 | 同一「计划时间 × 分片（× 执行器）」的重复触发只落一条记录 | 不覆盖手动触发（手动用 UUID，允许重复） |
 | `claimForRetry` 原子抢占 | 多实例同时看到同一条失败记录时只有一方重试 | 不跨执行器进程去重 |
+| RabbitMQ 至少一次投递 | 结果消息可能重复到达 | **不保证"只投递一次"**；靠落终态的 `status=RUNNING` 前置条件做到幂等 |
 
 **语义是「至少一次 + 业务幂等」，不是「保证不执行两遍」**：执行器侧没有按
 `executionId` 做去重。调度中心在执行途中崩溃、HTTP 超时但执行器其实已跑完、
@@ -176,6 +201,7 @@ leader 切换窗口等情况下，同一个处理器仍可能被执行两次。�
 | `tp_executor` | 执行器注册表 | `uk_app_address` 保证重复启动不产生重复记录 |
 | `tp_execution_log` | 执行记录 | `uk_execution_key` 幂等兜底；`next_retry_time` 退避；`fencing_token` / `leader_instance` 记录由哪个 leader 产生 |
 | `tp_leader` | leader 状态（单行 `id=1`） | `fencing_token` 单调递增，旧 token 的触发被拒 |
+| `tp_dead_letter` | 死信（Week 4） | `uk_dead_execution` 保证同一条执行记录只落一行死信 |
 
 时区统一 `Asia/Shanghai`，时间字段统一 `DATETIME(3)`。
 `deploy/sql/01-init.sql` 已含全部表与列；`02-week2-leader.sql`、`03-week3-retry.sql`
@@ -187,7 +213,7 @@ leader 切换窗口等情况下，同一个处理器仍可能被执行两次。�
 |---|---|
 | 2 | 时间轮 + Redisson 锁 + fencing token + 重启补偿；`next_trigger_time` 生效 |
 | 3 | 分片参数下发、执行器上下线重分配、失败转移、重试/退避、幂等闭环（已落地）；第 3 周评审修复 0.1~1.5 与端到端验收（已落地） |
-| 4 | MQ 上报结果、告警 webhook、Micrometer 指标、压测与 CI |
+| 4 | MQ 上报结果、告警 webhook、Micrometer 指标、压测与 CI（**结果异步上报 + 死信告警已落地**，其余待做） |
 | 5 | 文档、架构图、演示录屏 |
 
-> 当前进度：第 3 周 Day 5。Week 4 方向（结果回调异步化、死信告警、鉴权、压测）尚未开始。
+> 当前进度：第 4 周 Day 1 —— 结果异步上报（RabbitMQ）与死信告警已落地。鉴权、压测、CI 尚未开始。

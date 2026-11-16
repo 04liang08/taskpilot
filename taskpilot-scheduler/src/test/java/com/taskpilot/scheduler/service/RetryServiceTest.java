@@ -117,6 +117,8 @@ class RetryServiceTest {
         retryService.onShardFailed(new ShardFailedEvent(100L, 1L, 10L));
 
         verify(executionService, never()).markFailedForRetry(any(), anyString(), any());
+        // 重试预算耗尽 = 终态：落死信并告警，不能悄悄消失。
+        verify(executionService).markRetryExhausted(eq(execution), eq("重试预算耗尽"));
     }
 
     @Test
