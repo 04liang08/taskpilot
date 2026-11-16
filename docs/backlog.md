@@ -12,8 +12,11 @@
 > `verify-week4.ps1` 五场景证据核实）。复审新增遗留 **B-05 ~ B-07**（见下），
 > 均不影响合并、不影响执行正确性。
 >
-> **第 4 周 Day 2 追加**：A-3 里的「鉴权」（ADR-020）与「CI」（ADR-021）已落地，
-> 压测（JMeter）进行中。下面是剩下的条目。
+> **第 4 周 Day 2 追加**：A-3 里的「鉴权」（ADR-020）与「CI」（ADR-021）已落地。
+>
+> **第 4 周 Day 3 追加**：A-3 的「压测」（4.8）完成——[压测报告](perf-report.md) 给出
+> 50/100/200 并发实测（TPS 111/200/267，0 错误）与异步管道持续负载观测；压测中新发现 B-08（见下）。
+> 下面是剩下的条目。
 
 ## A. Week 4 起点
 
@@ -21,7 +24,7 @@
 |---|---|---|---|
 | 1 | **结果异步上报** | 执行器执行完走 MQ / 回调上报 | ✅ 已完成（4.1~4.4）：RabbitMQ 拓扑 + ACK 快回包 + 结果消费者 + 手动触发统一异步 |
 | 2 | **死信告警** | 重试预算耗尽的 FAILED 记录进死信表 + 告警 webhook | ✅ 已完成（4.5）：`tp_dead_letter` + DLX 消费者 + fanout 告警 + 可选 webhook |
-| 3 | **鉴权 / 压测 / CI** | 沿用 README 第 10 节「已知缺口」表的 Week 4 计划 | 🔶 进行中：鉴权（4.7）与 CI（4.9）已落地，JMeter 压测（4.8）待做 |
+| 3 | **鉴权 / 压测 / CI** | 沿用 README 第 10 节「已知缺口」表的 Week 4 计划 | ✅ 已完成（4.7/4.8/4.9）：鉴权（ADR-020）+ JMeter 压测（[perf-report](perf-report.md)）+ CI（ADR-021） |
 
 ## B. 评审遗留（不阻塞合并）
 
@@ -91,9 +94,40 @@
   语义上"失败已经落库了才通知别人"也更直观。
 - **优先级**：可选。
 
+### B-08 leader 选举状态对 DB 重置无自愈（4.8 压测中发现）
+
+- **位置**：`scheduler/.../service/TriggerService`（fencing 校验）、`scheduler/.../leader/LeaderElectionService`。
+- **现象**：压测中直接重置 MySQL（换 8.0 容器）后，`tp_leader` 行丢失；进程内存里仍是 leader
+  （Redis 锁与 fencing token 未受影响），但每次触发都被 fencing 校验拒绝（40900「本实例已不是 leader」），
+  **所有定时与手动触发全停**，直到重启 scheduler 重新选举写回 `tp_leader` 才自愈。
+- **影响**：仅 DB 被外部重置/迁移丢行的运维场景，正常故障转移（failover 换主）不受影响；
+  但表现为「集群明明活着却全员拒绝触发」，排查成本高。
+- **建议**：选举循环里检测到 Redis 持锁但 `tp_leader` 无本实例行时，定向补写（或 fencing 校验改为
+  以 Redis token 为准、DB 行仅展示用）；配一个「leader 行丢失 → 自愈补写」的单测。
+- **优先级**：低（运维边缘场景，不影响执行正确性）。
+
+### B-09 陈旧 ONLINE 执行器行的离线判定会误杀刚派发的在途记录（4.8 验收回归中发现）
+
+- **位置**：`scheduler/.../executor/ExecutorStatusListener`（心跳超时 → 下线事件）、
+  `scheduler/.../shard/ShardFailoverService`（按 executor 地址找 RUNNING 记录做转移）。
+- **现象**：执行器进程被硬杀时 `tp_executor` 行停留在 ONLINE、`last_heartbeat_time` 陈旧；同地址实例重启
+  并注册（注册按 `(appName,address)` 复用行）与调度中心的心跳超时扫描存在竞态——实测 verify-week4 场景①
+  里，新执行器刚接住派发（15:28:31）、其行在注册完成前被判离线（15:28:33），failover 按地址命中这条
+  在途记录，`retryMax=0` 直接标 FAILED 落死信；执行器随后跑完回传，结果被 `ResultProcessor` 忽略。
+  清空 `tp_executor` 后重跑验收五场景全过（退出码 0），即复现条件是「陈旧 ONLINE 行 + 竞态」，非必现。
+- **影响**：执行器重启后最初一个心跳窗口内派发的任务可能被误标 FAILED（取证失真 + 误告警/误死信），
+  实际业务代码仍执行完成、结果被丢弃。不影响数据正确性主路径（幂等键仍成立）。
+- **建议**：下线事件里若发现同 `(appName,address)` 行在本调度中心启动周期内刚重新注册成功（或恢复心跳），
+  跳过对在途记录的 failover；或注册 upsert 时立即刷新 `last_heartbeat_time` 再交给扫描线程比较。
+- **优先级**：中低（窗口小、可被下一次验收重跑掩盖，但滚动重启场景会踩）。
+
 ## C. 本地环境 / 卫生（非代码，不影响交付）
 
 - `.tmp/` 下的 playwright 截图/脚本、浏览器 profile、node_modules 与临时 MySQL 数据目录均已清理；`.tmp/verify-cluster/`、`.tmp/verify-week3/`、`.tmp/verify-week4/` 保留作为验收日志（均已 gitignore）。
 - 本机 3306 被 WorkBuddy 自身的 HTTP 服务占用、MySQL81 服务无法启动；E2E 曾用 `.tmp/mysql-data` 起 3307 隔离实例，通过 `-MysqlPort 3307` 传参，验收结束后已停止并删除。正常环境（MySQL 在 3306）直接跑默认参数即可。
 - `.workbuddy/` 是本地工作区数据，未纳入版本控制。
 - 第 4 周起 E2E 还需要 RabbitMQ（5672 / 15672）：`docker compose -f deploy/docker-compose.yml up -d rabbitmq`。
+- 4.8 压测用 MySQL 是 `docker run -d --name tp-perf-mysql -p 3307:3306 ... mysql:8.0`（仅挂载
+  `deploy/sql/01-init.sql`——整套 `deploy/sql` 目录挂进 initdb 会因 `02-week2-leader.sql` 对 01 已含列重复
+  ALTER 而启动失败退出）；本机原生 mysqld 8.1.0 在 ~100/s 写入下 APPCRASH，勿再用作压测库。
+  压测/验收完直接 `docker rm -f tp-perf-mysql` 即可，产物在 `.tmp/perf-*`（gitignore）。

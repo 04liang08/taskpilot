@@ -399,11 +399,13 @@ export TASKPILOT_AUTH_TOKEN="换成你自己的长随机串"
 
 - [x] Day 1：结果异步上报（RabbitMQ：ACK + 结果消息 + DLX）+ 手动触发统一异步 + 死信表与告警广播 + `scripts/verify-week4.ps1`
 - [x] Day 2：内部接口双向共享 token 鉴权（ADR-020）+ GitHub Actions CI（单测 + bash 冒烟，ADR-021）
-- [ ] Day 3~5：压测（JMeter）、Micrometer 指标、CI 增强
+- [x] Day 3：压测（JMeter 三档并发 + 异步管道持续负载），见 [压测报告](docs/perf-report.md)
+- [ ] Day 4~5：Micrometer 指标、CI 增强
 
 ## 8. 文档索引
 
 - [架构说明](docs/architecture.md)
+- [压测报告（4.8）](docs/perf-report.md)
 - [技术决策记录](docs/design-decisions.md)
 - [Backlog / Week 4 起点](docs/backlog.md)
 - [第 1 周开工方案（含完整 DDL / API / 每日任务）](docs/TaskPilot-第1周开工方案.md)
@@ -444,7 +446,7 @@ export TASKPILOT_AUTH_TOKEN="换成你自己的长随机串"
 | 执行器结果回传依赖 RabbitMQ | broker 不可达时应用仍能启动，但结果回不来，要等僵尸回收（`timeout + grace`）兜底标 TIMEOUT | ADR-019 已如实记录；保持现状 |
 | 执行器接口无鉴权 | — | **已修复（4.7）**：内部接口（调度中心↔执行器）用双向共享静态 token 保护；管理 API 仍开放（仅限内网） | — |
 | ~~没有 CI~~ | — | **已修复（4.9）**：GitHub Actions 两个 job（`mvn clean verify` + bash 端到端冒烟），service container 带 mysql/redis/rabbitmq | — |
-| 没有压测数据 | 简历里不能写吞吐/延迟数字 | Week 4：JMeter 实测 |
+| ~~没有压测数据~~ | — | **已补（4.8）**：JMeter 实测单机 50/100/200 并发 TPS 111/200/267、错误率 0、管道消费不积压；容量拐点在 100~200 并发，详见 [压测报告](docs/perf-report.md) |
 
 ## 11. Roadmap
 
