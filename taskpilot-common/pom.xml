@@ -31,5 +31,12 @@
       <groupId>org.springframework.amqp</groupId>
       <artifactId>spring-amqp</artifactId>
     </dependency>
+
+    <!-- 指标名常量与拒绝计数装饰器需要 micrometer-core（版本由 BOM 管理）；
+         MetricNames 本身保持零依赖（纯 String），micrometer 只出现在装饰器里。 -->
+    <dependency>
+      <groupId>io.micrometer</groupId>
+      <artifactId>micrometer-core</artifactId>
+    </dependency>
   </dependencies>
 </project>

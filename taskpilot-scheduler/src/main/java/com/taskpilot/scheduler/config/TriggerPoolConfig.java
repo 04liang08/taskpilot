@@ -1,5 +1,7 @@
 package com.taskpilot.scheduler.config;
 
+import com.taskpilot.common.metrics.CountingRejectedExecutionHandler;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -19,7 +21,7 @@ import java.util.concurrent.ThreadPoolExecutor;
 public class TriggerPoolConfig {
 
     @Bean(name = "triggerExecutor")
-    public ThreadPoolTaskExecutor triggerExecutor(SchedulerProperties properties) {
+    public ThreadPoolTaskExecutor triggerExecutor(SchedulerProperties properties, MeterRegistry meterRegistry) {
         SchedulerProperties.TriggerPool pool = properties.getTriggerPool();
         ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
         executor.setCorePoolSize(pool.getCoreSize());
@@ -27,7 +29,9 @@ public class TriggerPoolConfig {
         executor.setQueueCapacity(pool.getQueueCapacity());
         executor.setThreadNamePrefix("taskpilot-trigger-");
         // 队列满时直接拒绝并告警：让触发线程阻塞会拖慢整个时间轮，宁可丢一次触发。
-        executor.setRejectedExecutionHandler(new ThreadPoolExecutor.AbortPolicy());
+        // 拒绝数计入 taskpilot.pool.rejected{pool="triggerExecutor"}，语义不变（ADR-022）。
+        executor.setRejectedExecutionHandler(new CountingRejectedExecutionHandler(
+                meterRegistry, "triggerExecutor", new ThreadPoolExecutor.AbortPolicy()));
         executor.setWaitForTasksToCompleteOnShutdown(true);
         executor.setAwaitTerminationSeconds(20);
         executor.initialize();
@@ -38,14 +42,15 @@ public class TriggerPoolConfig {
      * 分片执行线程池。分片之间并发执行，池独立于触发线程池，避免互相等待。
      */
     @Bean(name = "shardExecutor")
-    public ThreadPoolTaskExecutor shardExecutor(SchedulerProperties properties) {
+    public ThreadPoolTaskExecutor shardExecutor(SchedulerProperties properties, MeterRegistry meterRegistry) {
         SchedulerProperties.ShardPool pool = properties.getShardPool();
         ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
         executor.setCorePoolSize(pool.getCoreSize());
         executor.setMaxPoolSize(pool.getMaxSize());
         executor.setQueueCapacity(pool.getQueueCapacity());
         executor.setThreadNamePrefix("taskpilot-shard-");
-        executor.setRejectedExecutionHandler(new ThreadPoolExecutor.AbortPolicy());
+        executor.setRejectedExecutionHandler(new CountingRejectedExecutionHandler(
+                meterRegistry, "shardExecutor", new ThreadPoolExecutor.AbortPolicy()));
         executor.setWaitForTasksToCompleteOnShutdown(true);
         executor.setAwaitTerminationSeconds(20);
         executor.initialize();

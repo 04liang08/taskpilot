@@ -1,5 +1,7 @@
 package com.taskpilot.executor.config;
 
+import com.taskpilot.common.metrics.CountingRejectedExecutionHandler;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
@@ -36,14 +38,17 @@ public class ThreadPoolConfig {
      * 比悄悄堆积、最后超时要好。</p>
      */
     @Bean(name = "executionDispatchPool")
-    public ThreadPoolTaskExecutor executionDispatchPool(ExecutorProperties properties) {
+    public ThreadPoolTaskExecutor executionDispatchPool(ExecutorProperties properties, MeterRegistry meterRegistry) {
         ExecutorProperties.DispatchPool pool = properties.getDispatchPool();
         ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
         executor.setCorePoolSize(pool.getCoreSize());
         executor.setMaxPoolSize(pool.getMaxSize());
         executor.setQueueCapacity(pool.getQueueCapacity());
         executor.setThreadNamePrefix("taskpilot-dispatch-");
-        executor.setRejectedExecutionHandler(new ThreadPoolExecutor.AbortPolicy());
+        // 拒绝语义不变（Abort 抛异常，调度中心标失败走重试），只补计数（ADR-022）。
+        // taskExecutorPool 是 CallerRunsPolicy，天然背压不拒绝，无需计数。
+        executor.setRejectedExecutionHandler(new CountingRejectedExecutionHandler(
+                meterRegistry, "executionDispatchPool", new ThreadPoolExecutor.AbortPolicy()));
         executor.setWaitForTasksToCompleteOnShutdown(true);
         executor.setAwaitTerminationSeconds(20);
         executor.initialize();
