@@ -86,12 +86,13 @@ public class AuthTokenFilter extends OncePerRequestFilter {
     }
 
     private String pathWithinApplication(HttpServletRequest request) {
-        String path = request.getRequestURI();
-        String contextPath = request.getContextPath();
-        if (contextPath != null && !contextPath.isEmpty() && path.startsWith(contextPath)) {
-            path = path.substring(contextPath.length());
-        }
-        return path;
+        // B-10：必须按【解码后】路径匹配。getRequestURI() 返回原始 URI，
+        // /api/v1/executors/%72egister 这类编码前缀会让 equals 漏判放行，
+        // 而 Spring 的 PathPattern 按解码后路径照样映射到受保护处理器。
+        // getServletPath() 由容器解码且已去掉 contextPath（REQUEST dispatch 下成立；
+        // 本 filter 只处理 REQUEST）。
+        String path = request.getServletPath();
+        return path == null ? "" : path;
     }
 
     private void writeUnauthorized(HttpServletResponse response) throws IOException {

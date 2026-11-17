@@ -72,6 +72,7 @@ class AuthTokenFilterTest {
     void handlersEndpointIsAlsoProtected() throws Exception {
         // 处理器列表也是内部接口：不能让外人看到有哪些 handler 能被调用。
         MockHttpServletRequest request = new MockHttpServletRequest("GET", "/api/v1/executor/handlers");
+        request.setServletPath("/api/v1/executor/handlers");
         MockHttpServletResponse response = new MockHttpServletResponse();
         AtomicBoolean chainCalled = new AtomicBoolean();
 
@@ -94,7 +95,25 @@ class AuthTokenFilterTest {
         assertThat(response.getStatus()).isEqualTo(200);
     }
 
+    @Test
+    void percentEncodedPrefixStillBlocked() throws Exception {
+        // B-10：/api/v1/%65xecutor/execute（%65=e）这类编码前缀，容器解码后的
+        // servletPath 仍是受保护路径，必须照样拒绝——旧实现按原始 URI 前缀匹配会放行。
+        MockHttpServletRequest request = new MockHttpServletRequest("POST", "/api/v1/%65xecutor/execute");
+        request.setServletPath("/api/v1/executor/execute");
+        MockHttpServletResponse response = new MockHttpServletResponse();
+        AtomicBoolean chainCalled = new AtomicBoolean();
+
+        filter.doFilter(request, response, (req, res) -> chainCalled.set(true));
+
+        assertThat(chainCalled).isFalse();
+        assertThat(response.getStatus()).isEqualTo(401);
+    }
+
     private MockHttpServletRequest post(String path) {
-        return new MockHttpServletRequest("POST", path);
+        MockHttpServletRequest request = new MockHttpServletRequest("POST", path);
+        // 真实容器在 REQUEST dispatch 下把解码后的路径放进 servletPath，filter 以它为准（B-10）。
+        request.setServletPath(path);
+        return request;
     }
 }

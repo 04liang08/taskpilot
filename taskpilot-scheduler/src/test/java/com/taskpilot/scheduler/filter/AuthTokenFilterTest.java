@@ -133,7 +133,25 @@ class AuthTokenFilterTest {
         assertThat(response.getStatus()).isEqualTo(401);
     }
 
+    @Test
+    void percentEncodedRegisterStillRequiresToken() throws Exception {
+        // B-10：原始 URI 带百分号编码（%72=r）时，容器给出的 servletPath 已解码，
+        // filter 必须照样拦截——旧实现按 getRequestURI() 匹配会放行。
+        MockHttpServletRequest request = new MockHttpServletRequest("POST", "/api/v1/executors/%72egister");
+        request.setServletPath("/api/v1/executors/register");
+        MockHttpServletResponse response = new MockHttpServletResponse();
+        AtomicBoolean chainCalled = new AtomicBoolean();
+
+        filter.doFilter(request, response, (req, res) -> chainCalled.set(true));
+
+        assertThat(chainCalled).isFalse();
+        assertThat(response.getStatus()).isEqualTo(401);
+    }
+
     private MockHttpServletRequest post(String path) {
-        return new MockHttpServletRequest("POST", path);
+        MockHttpServletRequest request = new MockHttpServletRequest("POST", path);
+        // 真实容器在 REQUEST dispatch 下把解码后的路径放进 servletPath，filter 以它为准（B-10）。
+        request.setServletPath(path);
+        return request;
     }
 }

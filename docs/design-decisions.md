@@ -433,6 +433,14 @@ token 比对用 `MessageDigest.isEqual` 而不是 `String.equals`：`String.equa
 同理，**没配 token 时一律拒绝**（fail-closed）：漏配 `TASKPILOT_AUTH_TOKEN` 就把内部接口
 裸奔出去，比"直接起不来"危险得多。启动时打一条 ERROR 日志说明原因。
 
+### 按解码路径匹配（B-10 修复）
+
+filter 判断"这个请求是否命中受保护路径"用的是 `getServletPath()`（容器已 URL 解码、
+且不含 contextPath），**不是** `getRequestURI()`（原始编码串）。否则
+`/api/v1/%65xecutor/execute` 这类百分号编码前缀会让 `startsWith/equals` 漏判放行，
+而 Spring 的 PathPattern 按解码后路径照样把请求映射进受保护处理器——等于绕开 token。
+两侧各有一条「编码前缀仍被拒」的单测钉住这个语义。日志里保留原始 URI 便于取证。
+
 **代价**：
 
 - 静态 token 没有过期、没有轮换、没有审计。真要上生产得换成带 TTL 的短期 token 或 mTLS。

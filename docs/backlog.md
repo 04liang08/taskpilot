@@ -124,6 +124,8 @@
 
 ### B-10 鉴权 filter 用原始 URI 匹配，百分号编码前缀可绕过（4.7 复审发现）
 
+- **状态**：✅ 已修（Week 4 收尾补丁：两处 filter 改为 `getServletPath()` 解码路径匹配，
+  两侧各补「编码前缀仍被拒」单测；ADR-020 同步「按解码路径匹配」一节）。
 - **位置**：`scheduler/.../filter/AuthTokenFilter.java#requiresToken`、`executor/.../filter/AuthTokenFilter.java#requiresToken`。
 - **现状**：两者都对 `request.getRequestURI()`（未解码）做 `equals`/`startsWith`。
   请求 `/api/v1/%65xecutor/execute`（或 `/api/v1/executors/%72egister`）时，原始 URI 不含字面前缀 →
