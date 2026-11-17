@@ -11,6 +11,7 @@ import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -31,10 +32,19 @@ class QueueDepthMetricsTest {
     @BeforeAll
     static void startServer() throws IOException {
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
-        server.createContext("/api/queues/%2F/" + MqTopology.RESULTS_QUEUE, exchange ->
-                respond(exchange, "{\"name\":\"" + MqTopology.RESULTS_QUEUE + "\",\"messages\":42}"));
-        server.createContext("/api/queues/%2F/" + MqTopology.DEAD_QUEUE, exchange ->
-                respond(exchange, "{\"name\":\"" + MqTopology.DEAD_QUEUE + "\",\"messages\":0}"));
+        // 注册根路径：JDK HttpServer 按解码路径匹配 context（raw %2F 会被解码成 //），
+        // 本测试的职责是"解析 messages / 降级 / gauge 注册"，线格式（原始 %2F）
+        // 由 queueUriKeepsPercentEncodedVhostRaw 专门钉住，真实语义在生产验证过。
+        server.createContext("/", exchange -> {
+            String path = exchange.getRequestURI().getPath();
+            if (path.contains(MqTopology.RESULTS_QUEUE)) {
+                respond(exchange, 200, "{\"name\":\"" + MqTopology.RESULTS_QUEUE + "\",\"messages\":42}");
+            } else if (path.contains(MqTopology.DEAD_QUEUE)) {
+                respond(exchange, 200, "{\"name\":\"" + MqTopology.DEAD_QUEUE + "\",\"messages\":0}");
+            } else {
+                respond(exchange, 404, "{\"error\":\"Object Not Found\"}");
+            }
+        });
         server.start();
         baseUrl = "http://127.0.0.1:" + server.getAddress().getPort();
     }
@@ -77,14 +87,29 @@ class QueueDepthMetricsTest {
         assertThat(metrics.fetchDepth("no.such.queue")).isNull();
     }
 
+    @Test
+    void queueUriKeepsPercentEncodedVhostRaw() {
+        // 回归防护在客户端侧：management API 的 vhost 必须以原始 %2F 发送，
+        // 一旦被 uriTemplate 重新编解码成 /，RabbitMQ 会 404（真实集成里踩过）。
+        URI uri = URI.create(baseUrl + QueueDepthMetrics.queueApiPath(MqTopology.RESULTS_QUEUE));
+
+        assertThat(uri.getRawPath()).contains("/api/queues/%2F/");
+        assertThat(uri.getRawPath()).doesNotContain("//taskpilot");
+    }
+
     private Gauge gauge(String queue) {
         return registry.get(MetricNames.QUEUE_DEPTH).tag("queue", queue).gauge();
     }
 
     private static void respond(com.sun.net.httpserver.HttpExchange exchange, String body) throws IOException {
+        respond(exchange, 200, body);
+    }
+
+    private static void respond(com.sun.net.httpserver.HttpExchange exchange, int status, String body)
+            throws IOException {
         byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
         exchange.getResponseHeaders().add("Content-Type", "application/json");
-        exchange.sendResponseHeaders(200, bytes.length);
+        exchange.sendResponseHeaders(status, bytes.length);
         exchange.getResponseBody().write(bytes);
         exchange.close();
     }

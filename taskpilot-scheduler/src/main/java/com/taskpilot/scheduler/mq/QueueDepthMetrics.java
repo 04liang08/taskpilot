@@ -14,6 +14,7 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
 
+import java.net.URI;
 import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
@@ -39,18 +40,19 @@ public class QueueDepthMetrics {
     private static final List<String> QUEUES = List.of(MqTopology.RESULTS_QUEUE, MqTopology.DEAD_QUEUE);
 
     private final RestClient restClient;
+    private final String managementUrl;
     private final ConcurrentMap<String, AtomicLong> depths = new ConcurrentHashMap<>();
 
     public QueueDepthMetrics(MeterRegistry meterRegistry,
                              @Value("${taskpilot.metrics.rabbit-management.url:http://127.0.0.1:15672}") String url,
                              @Value("${spring.rabbitmq.username:taskpilot}") String username,
                              @Value("${spring.rabbitmq.password:taskpilot}") String password) {
+        this.managementUrl = url;
         SimpleClientHttpRequestFactory requestFactory = new SimpleClientHttpRequestFactory();
         // 短超时：拿不到就下一轮再说，不占调度线程。
         requestFactory.setConnectTimeout(Duration.ofSeconds(2));
         requestFactory.setReadTimeout(Duration.ofSeconds(3));
         this.restClient = RestClient.builder()
-                .baseUrl(url)
                 .requestFactory(requestFactory)
                 .defaultHeaders(headers -> headers.setBasicAuth(username, password))
                 .build();
@@ -76,11 +78,19 @@ public class QueueDepthMetrics {
         }
     }
 
+    /** management API 的队列路径：vhost "/" 必须保持原始 %2F（见 queueUriKeepsPercentEncodedVhostRaw）。 */
+    static String queueApiPath(String queue) {
+        return "/api/queues/" + VHOST + "/" + queue;
+    }
+
     /** 取一个队列的 messages 总数（ready+unacknowledged）；失败返回 null 触发降级。 */
     Long fetchDepth(String queue) {
         try {
+            // 必须走 uri(URI)：字符串形式会被当 uriTemplate 再编码一次（%2F→%252F），
+            // management 会把 vhost 当字面量 "%2F" 找不到队列直接 404（真实集成里踩过，
+            // 单测的 JDK HttpServer 按解码路径匹配 context 会掩盖这一点）。
             String body = restClient.get()
-                    .uri("/api/queues/" + VHOST + "/" + queue)
+                    .uri(URI.create(managementUrl + queueApiPath(queue)))
                     .retrieve()
                     .body(String.class);
             if (body == null) {
