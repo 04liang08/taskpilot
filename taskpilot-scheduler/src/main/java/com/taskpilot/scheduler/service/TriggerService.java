@@ -7,7 +7,11 @@ import com.taskpilot.common.enums.TaskStatus;
 import com.taskpilot.common.enums.TriggerType;
 import com.taskpilot.common.exception.BizException;
 import com.taskpilot.common.exception.ErrorCode;
+import com.taskpilot.common.metrics.MetricNames;
 import com.taskpilot.scheduler.client.ExecutorClient;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import com.taskpilot.scheduler.dto.CreatedExecution;
 import com.taskpilot.scheduler.dto.TriggerResult;
 import com.taskpilot.scheduler.entity.ExecutionLogEntity;
@@ -28,6 +32,7 @@ import org.springframework.web.client.RestClientException;
 
 import java.net.SocketTimeoutException;
 import java.net.http.HttpTimeoutException;
+import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
@@ -55,6 +60,7 @@ public class TriggerService {
     private final ThreadPoolTaskExecutor triggerExecutor;
     private final ThreadPoolTaskExecutor shardExecutor;
     private final ResultProcessor resultProcessor;
+    private final MeterRegistry meterRegistry;
     private final AtomicInteger roundRobin = new AtomicInteger();
 
     public TriggerService(TaskService taskService,
@@ -65,7 +71,8 @@ public class TriggerService {
                           ShardAllocatorRegistry shardAllocatorRegistry,
                           @Qualifier("triggerExecutor") ThreadPoolTaskExecutor triggerExecutor,
                           @Qualifier("shardExecutor") ThreadPoolTaskExecutor shardExecutor,
-                          ResultProcessor resultProcessor) {
+                          ResultProcessor resultProcessor,
+                          MeterRegistry meterRegistry) {
         this.taskService = taskService;
         this.executorService = executorService;
         this.executionService = executionService;
@@ -75,6 +82,7 @@ public class TriggerService {
         this.triggerExecutor = triggerExecutor;
         this.shardExecutor = shardExecutor;
         this.resultProcessor = resultProcessor;
+        this.meterRegistry = meterRegistry;
     }
 
     /**
@@ -129,16 +137,19 @@ public class TriggerService {
         // 已知竞态：check 与 insert 之间还有毫秒级窗口，两个实例同时通过检查时
         // 仍可能各建一条记录。重复落库由幂等键 + uk_execution_key 兜住（ADR-017）。
         if (executionService.existsRunning(taskId)) {
+            countTrigger(triggerType, "conflict_running");
             throw new BizException(ErrorCode.CONFLICT, "任务正在执行中，请稍后再试: " + taskId);
         }
         // fencing 校验：锁过期但仍以为自己 leader 的实例，写库时会被这里拒绝。
         if (leaderContext.fenced() && !leaderStateService.checkFence(leaderContext.fencingToken())) {
+            countTrigger(triggerType, "fencing_rejected");
             throw new BizException(ErrorCode.CONFLICT,
                     "本实例已不是 leader（fencing token 失效），放弃本次触发: taskId=" + taskId);
         }
 
         List<ExecutorEntity> onlineExecutors = executorService.listOnline();
         if (onlineExecutors.isEmpty()) {
+            countTrigger(triggerType, "no_executor");
             ExecutionLogEntity failed = executionService.createFailed(
                     task, "没有可用的在线执行器", leaderContext, triggerType);
             throw new BizException(ErrorCode.EXECUTOR_UNAVAILABLE,
@@ -153,6 +164,7 @@ public class TriggerService {
             List<ExecutionLogEntity> results = executeShards(
                     List.of(new ShardJob(task, executor, 0, 1, executionKey(taskId, scheduledTime, 0, executor, 1))),
                     task, triggerType, leaderContext);
+            countTrigger(triggerType, "dispatched");
             return TriggerResult.of(results);
         }
 
@@ -168,12 +180,14 @@ public class TriggerService {
             }
         }
         if (jobs.isEmpty()) {
+            countTrigger(triggerType, "no_executor");
             throw new BizException(ErrorCode.EXECUTOR_UNAVAILABLE,
                     "分片没有分配到任何执行器，taskId=" + taskId);
         }
         List<ExecutionLogEntity> results = executeShards(jobs, task, triggerType, leaderContext);
         log.info("sharded trigger finished: taskId={}, shardTotal={}, executions={}, strategy={}",
                 taskId, shardTotal, results.size(), shardAllocatorRegistry.strategy());
+        countTrigger(triggerType, "dispatched");
         return TriggerResult.of(results);
     }
 
@@ -277,10 +291,12 @@ public class TriggerService {
                 execution.getShardTotal(),
                 task.getTimeoutSeconds());
 
+        long dispatchStartNanos = System.nanoTime();
         try {
             ExecuteAck ack = executorClient.execute(executor.getAddress(), request);
             if (ack.accepted()) {
                 // 执行器已受理：结果稍后经 RabbitMQ 回传，记录保持 RUNNING。
+                recordDispatch(dispatchStartNanos, "accepted");
                 log.info("{} dispatched: taskId={}, executionId={}, shard={}/{}, executor={}",
                         triggerType == TriggerType.CRON ? "scheduled trigger" : "manual trigger",
                         task.getId(), execution.getId(), execution.getShardIndex(), execution.getShardTotal(),
@@ -288,12 +304,14 @@ public class TriggerService {
                 return execution;
             }
             // 执行器现在接不了（线程池满等）：直接失败，走原来的重试 / 失败转移链路。
+            recordDispatch(dispatchStartNanos, "rejected");
             log.warn("{} rejected by executor: taskId={}, executionId={}, reason={}",
                     triggerType == TriggerType.CRON ? "scheduled trigger" : "manual trigger",
                     task.getId(), execution.getId(), ack.rejectReason());
             return resultProcessor.processDispatchFailure(execution, ExecutionStatus.FAILED,
                     "执行器拒绝执行: " + ack.rejectReason());
         } catch (ResourceAccessException e) {
+            recordDispatch(dispatchStartNanos, "error");
             if (isTimeout(e)) {
                 log.warn("dispatch timeout: taskId={}, executionId={}, executor={}, reason={}",
                         task.getId(), execution.getId(), executor.getAddress(), rootMessage(e));
@@ -305,15 +323,39 @@ public class TriggerService {
             return resultProcessor.processDispatchFailure(execution, ExecutionStatus.FAILED,
                     "调用执行器失败: " + rootMessage(e));
         } catch (RestClientException e) {
+            recordDispatch(dispatchStartNanos, "error");
             log.warn("dispatch failed: taskId={}, executionId={}, executor={}, reason={}",
                     task.getId(), execution.getId(), executor.getAddress(), rootMessage(e));
             return resultProcessor.processDispatchFailure(execution, ExecutionStatus.FAILED,
                     "调用执行器失败: " + rootMessage(e));
         } catch (Exception e) {
+            recordDispatch(dispatchStartNanos, "error");
             log.error("dispatch error: taskId={}, executionId={}", task.getId(), execution.getId(), e);
             return resultProcessor.processDispatchFailure(execution, ExecutionStatus.FAILED,
                     "触发异常: " + rootMessage(e));
         }
+    }
+
+    /**
+     * 触发计数（ADR-022）：outcome 是低基数枚举——
+     * dispatched=通过全部守卫进入派发；conflict_running/fencing_rejected/no_executor 对应三个守卫拒绝点。
+     */
+    private void countTrigger(TriggerType triggerType, String outcome) {
+        Counter.builder(MetricNames.TRIGGERS)
+                .description("触发次数（按类型与结局）")
+                .tag("trigger_type", triggerType == TriggerType.CRON ? "cron" : "manual")
+                .tag("outcome", outcome)
+                .register(meterRegistry)
+                .increment();
+    }
+
+    /** 派发 ACK 往返耗时（accepted|rejected|error）。 */
+    private void recordDispatch(long startNanos, String outcome) {
+        Timer.builder(MetricNames.DISPATCH)
+                .description("派发请求的执行器 ACK 往返耗时")
+                .tag("outcome", outcome)
+                .register(meterRegistry)
+                .record(Duration.ofNanos(System.nanoTime() - startNanos));
     }
 
     /**

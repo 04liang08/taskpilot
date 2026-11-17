@@ -3,8 +3,11 @@ package com.taskpilot.scheduler.service;
 import com.taskpilot.common.dto.ExecutionResultMessage;
 import com.taskpilot.common.enums.ExecutionStatus;
 import com.taskpilot.common.enums.TriggerType;
+import com.taskpilot.common.metrics.MetricNames;
 import com.taskpilot.scheduler.entity.ExecutionLogEntity;
 import com.taskpilot.scheduler.shard.ShardFailedEvent;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -14,6 +17,7 @@ import org.springframework.context.ApplicationEventPublisher;
 
 import java.time.LocalDateTime;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
@@ -31,10 +35,11 @@ class ResultProcessorTest {
     private ApplicationEventPublisher eventPublisher;
 
     private ResultProcessor resultProcessor;
+    private final SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
 
     @BeforeEach
     void setUp() {
-        resultProcessor = new ResultProcessor(executionService, eventPublisher);
+        resultProcessor = new ResultProcessor(executionService, eventPublisher, meterRegistry);
     }
 
     @Test
@@ -99,6 +104,41 @@ class ResultProcessorTest {
         resultProcessor.processDispatchFailure(execution, ExecutionStatus.FAILED, "调用执行器失败");
 
         verify(eventPublisher).publishEvent(any(ShardFailedEvent.class));
+    }
+
+    @Test
+    void resultMetricsCoverBothEntriesAndDuration() {
+        // 4.10.3：两条入口语义一致——applied / ignored / dispatch_failure 分开计数，
+        // applied 时记录耗时分布（ADR-022）。
+        ExecutionLogEntity execution = running(100L, TriggerType.MANUAL);
+        when(executionService.get(100L)).thenReturn(execution);
+        when(executionService.finishIfRunning(eq(execution), eq(ExecutionStatus.SUCCESS), eq(12L), any(), any()))
+                .thenReturn(true);
+        resultProcessor.process(message(ExecutionStatus.SUCCESS));
+        assertThat(resultCounter(ExecutionStatus.SUCCESS, "applied").count()).isEqualTo(1.0);
+        assertThat(meterRegistry.get(MetricNames.EXECUTION_DURATION).tag("status", "success").summary().count())
+                .isEqualTo(1);
+
+        // 重复投递：ignored，不再进耗时分布。
+        when(executionService.finishIfRunning(eq(execution), eq(ExecutionStatus.SUCCESS), eq(12L), any(), any()))
+                .thenReturn(false);
+        resultProcessor.process(message(ExecutionStatus.SUCCESS));
+        assertThat(resultCounter(ExecutionStatus.SUCCESS, "ignored").count()).isEqualTo(1.0);
+
+        // 调度侧失败入口：dispatch_failure。
+        ExecutionLogEntity running = running(101L, TriggerType.CRON);
+        when(executionService.get(101L)).thenReturn(running);
+        when(executionService.finishIfRunning(eq(running), eq(ExecutionStatus.FAILED), anyLong(), any(), any()))
+                .thenReturn(true);
+        resultProcessor.processDispatchFailure(running, ExecutionStatus.FAILED, "执行器拒绝执行");
+        assertThat(resultCounter(ExecutionStatus.FAILED, "dispatch_failure").count()).isEqualTo(1.0);
+    }
+
+    private Counter resultCounter(ExecutionStatus status, String outcome) {
+        return meterRegistry.get(MetricNames.EXECUTION_RESULTS)
+                .tag("status", status.name().toLowerCase())
+                .tag("outcome", outcome)
+                .counter();
     }
 
     private ExecutionResultMessage message(ExecutionStatus status) {

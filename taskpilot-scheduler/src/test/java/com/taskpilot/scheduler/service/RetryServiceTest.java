@@ -7,6 +7,7 @@ import com.taskpilot.scheduler.entity.ExecutionLogEntity;
 import com.taskpilot.scheduler.entity.ExecutorEntity;
 import com.taskpilot.scheduler.entity.TaskEntity;
 import com.taskpilot.scheduler.shard.ShardFailedEvent;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -69,7 +70,8 @@ class RetryServiceTest {
         shardExecutor.setThreadNamePrefix("taskpilot-shard-");
         shardExecutor.initialize();
         retryService = new RetryService(taskService, executionService, executorService,
-                triggerService, retryScheduler, shardExecutor, eventPublisher);
+                triggerService, retryScheduler, shardExecutor, eventPublisher,
+                new SimpleMeterRegistry());
     }
 
     @AfterEach
@@ -176,7 +178,8 @@ class RetryServiceTest {
         ThreadPoolTaskExecutor rejecting = mock(ThreadPoolTaskExecutor.class);
         doThrow(new TaskRejectedException("shard pool is full")).when(rejecting).execute(any(Runnable.class));
         RetryService service = new RetryService(taskService, executionService, executorService,
-                triggerService, retryScheduler, rejecting, eventPublisher);
+                triggerService, retryScheduler, rejecting, eventPublisher,
+                new SimpleMeterRegistry());
 
         when(executionService.listPendingRetries()).thenReturn(List.of(execution));
         when(executionService.get(100L)).thenReturn(execution);

@@ -1,10 +1,13 @@
 package com.taskpilot.scheduler.service;
 
 import com.taskpilot.common.exception.BizException;
+import com.taskpilot.common.metrics.MetricNames;
 import com.taskpilot.scheduler.entity.ExecutionLogEntity;
 import com.taskpilot.scheduler.entity.ExecutorEntity;
 import com.taskpilot.scheduler.entity.TaskEntity;
 import com.taskpilot.scheduler.shard.ShardFailedEvent;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -61,6 +64,7 @@ public class RetryService {
     private final ScheduledExecutorService retryScheduler;
     private final ThreadPoolTaskExecutor shardExecutor;
     private final ApplicationEventPublisher eventPublisher;
+    private final MeterRegistry meterRegistry;
 
     /** 本地去重：同一条记录同时只安排一个延迟重试。 */
     private final Set<Long> scheduled = ConcurrentHashMap.newKeySet();
@@ -71,7 +75,8 @@ public class RetryService {
                         TriggerService triggerService,
                         @Qualifier("retryScheduler") ScheduledExecutorService retryScheduler,
                         @Qualifier("shardExecutor") ThreadPoolTaskExecutor shardExecutor,
-                        ApplicationEventPublisher eventPublisher) {
+                        ApplicationEventPublisher eventPublisher,
+                        MeterRegistry meterRegistry) {
         this.taskService = taskService;
         this.executionService = executionService;
         this.executorService = executorService;
@@ -79,6 +84,16 @@ public class RetryService {
         this.retryScheduler = retryScheduler;
         this.shardExecutor = shardExecutor;
         this.eventPublisher = eventPublisher;
+        this.meterRegistry = meterRegistry;
+    }
+
+    /** 重试计数：action=scheduled|handed_over（exhausted 记在 ExecutionService.markRetryExhausted）。 */
+    private void countRetry(String action) {
+        Counter.builder(MetricNames.RETRIES)
+                .description("重试相关事件次数")
+                .tag("action", action)
+                .register(meterRegistry)
+                .increment();
     }
 
     /**
@@ -137,6 +152,7 @@ public class RetryService {
                     scheduled.remove(execution.getId());
                 }
             }, delaySeconds, TimeUnit.SECONDS);
+            countRetry("scheduled");
             log.warn("backoff retry scheduled: executionId={}, taskId={}, retryCount={}/{}, delay={}s",
                     execution.getId(), task.getId(), execution.getRetryCount(), task.getRetryMax(), delaySeconds);
         } catch (RejectedExecutionException e) {
@@ -183,6 +199,7 @@ public class RetryService {
      * 也让"失败转移"只有一个入口。</p>
      */
     private void handOverToFailover(ExecutionLogEntity execution) {
+        countRetry("handed_over");
         log.info("backoff retry handed over to failover: executionId={}, executorId={}",
                 execution.getId(), execution.getExecutorId());
         eventPublisher.publishEvent(new ShardFailedEvent(

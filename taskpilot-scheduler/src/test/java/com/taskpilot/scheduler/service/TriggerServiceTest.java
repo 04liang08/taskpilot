@@ -7,6 +7,7 @@ import com.taskpilot.common.enums.TaskStatus;
 import com.taskpilot.common.enums.TriggerType;
 import com.taskpilot.common.exception.BizException;
 import com.taskpilot.common.exception.ErrorCode;
+import com.taskpilot.common.metrics.MetricNames;
 import com.taskpilot.scheduler.client.ExecutorClient;
 import com.taskpilot.scheduler.dto.CreatedExecution;
 import com.taskpilot.scheduler.dto.TriggerResult;
@@ -17,6 +18,8 @@ import com.taskpilot.scheduler.leader.LeaderContext;
 import com.taskpilot.scheduler.leader.LeaderStateService;
 import com.taskpilot.scheduler.shard.ShardAllocator;
 import com.taskpilot.scheduler.shard.ShardAllocatorRegistry;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -88,6 +91,7 @@ class TriggerServiceTest {
 
     private ThreadPoolTaskExecutor shardExecutor;
     private TriggerService triggerService;
+    private final SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
 
     @BeforeEach
     void setUp() {
@@ -98,7 +102,8 @@ class TriggerServiceTest {
         shardExecutor.setQueueCapacity(64);
         shardExecutor.initialize();
         triggerService = new TriggerService(taskService, executorService, executionService, executorClient,
-                leaderStateService, shardAllocatorRegistry, triggerExecutor, shardExecutor, resultProcessor);
+                leaderStateService, shardAllocatorRegistry, triggerExecutor, shardExecutor, resultProcessor,
+                meterRegistry);
     }
 
     @AfterEach
@@ -459,6 +464,45 @@ class TriggerServiceTest {
             ((Runnable) invocation.getArgument(0)).run();
             return null;
         }).when(triggerExecutor).execute(any(Runnable.class));
+    }
+
+    @Test
+    void triggerMetricsFollowBranches() {
+        // 4.10.3：触发链路各守卫分支与成功派发都要计数、派发 ACK 要有耗时（ADR-022）。
+        TaskEntity task = enabledTask();
+        when(taskService.get(1L)).thenReturn(task);
+
+        // 守卫 1：同一任务在执行中。
+        when(executionService.existsRunning(1L)).thenReturn(true);
+        assertThatThrownBy(() -> triggerService.trigger(1L)).isInstanceOf(BizException.class);
+        assertThat(triggerCounter("conflict_running").count()).isEqualTo(1.0);
+
+        // 通过守卫进入派发：dispatched + dispatch timer(accepted)。
+        when(executionService.existsRunning(1L)).thenReturn(false);
+        ExecutorEntity executor = onlineExecutor();
+        when(executorService.listOnline()).thenReturn(List.of(executor));
+        when(executionService.createRunning(eq(task), eq(executor), eq(TriggerType.MANUAL), any(),
+                anyInt(), anyInt(), anyString()))
+                .thenReturn(new CreatedExecution(runningExecution(250L), true));
+        when(executorClient.execute(eq("127.0.0.1:8081"), any(ExecuteRequest.class))).thenReturn(ExecuteAck.ok());
+        triggerService.trigger(1L);
+        assertThat(triggerCounter("dispatched").count()).isEqualTo(1.0);
+        assertThat(meterRegistry.get(MetricNames.DISPATCH).tag("outcome", "accepted").timer().count())
+                .isEqualTo(1);
+
+        // 守卫 3：没有在线执行器。
+        when(executorService.listOnline()).thenReturn(List.of());
+        when(executionService.createFailed(eq(task), anyString(), any(), eq(TriggerType.MANUAL)))
+                .thenReturn(runningExecution(251L));
+        assertThatThrownBy(() -> triggerService.trigger(1L)).isInstanceOf(BizException.class);
+        assertThat(triggerCounter("no_executor").count()).isEqualTo(1.0);
+    }
+
+    private Counter triggerCounter(String outcome) {
+        return meterRegistry.get(MetricNames.TRIGGERS)
+                .tag("trigger_type", "manual")
+                .tag("outcome", outcome)
+                .counter();
     }
 
     private TaskEntity enabledTask() {

@@ -10,6 +10,7 @@ import com.taskpilot.scheduler.service.ExecutionService;
 import com.taskpilot.scheduler.service.ExecutorService;
 import com.taskpilot.scheduler.service.TaskService;
 import com.taskpilot.scheduler.service.TriggerService;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -62,7 +63,7 @@ class ShardFailoverServiceTest {
         pool.setQueueCapacity(16);
         pool.initialize();
         service = new ShardFailoverService(taskService, executorService, executionService, triggerService,
-                shardAllocatorRegistry, pool);
+                shardAllocatorRegistry, pool, new SimpleMeterRegistry());
     }
 
     @Test

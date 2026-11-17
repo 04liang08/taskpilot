@@ -9,6 +9,7 @@ import com.taskpilot.common.enums.ExecutionStatus;
 import com.taskpilot.common.enums.TriggerType;
 import com.taskpilot.common.exception.BizException;
 import com.taskpilot.common.exception.ErrorCode;
+import com.taskpilot.common.metrics.MetricNames;
 import com.taskpilot.scheduler.dto.CreatedExecution;
 import com.taskpilot.scheduler.dto.ExecutionQuery;
 import com.taskpilot.scheduler.entity.ExecutionLogEntity;
@@ -16,6 +17,8 @@ import com.taskpilot.scheduler.entity.ExecutorEntity;
 import com.taskpilot.scheduler.entity.TaskEntity;
 import com.taskpilot.scheduler.leader.LeaderContext;
 import com.taskpilot.scheduler.mapper.ExecutionLogMapper;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.dao.DuplicateKeyException;
@@ -46,10 +49,13 @@ public class ExecutionService {
 
     private final ExecutionLogMapper executionLogMapper;
     private final DeadLetterService deadLetterService;
+    private final MeterRegistry meterRegistry;
 
-    public ExecutionService(ExecutionLogMapper executionLogMapper, DeadLetterService deadLetterService) {
+    public ExecutionService(ExecutionLogMapper executionLogMapper, DeadLetterService deadLetterService,
+                            MeterRegistry meterRegistry) {
         this.executionLogMapper = executionLogMapper;
         this.deadLetterService = deadLetterService;
+        this.meterRegistry = meterRegistry;
     }
 
     /**
@@ -209,6 +215,11 @@ public class ExecutionService {
      * @param reason 死信原因，会记进 tp_dead_letter.last_error
      */
     public void markRetryExhausted(ExecutionLogEntity execution, String reason) {
+        Counter.builder(MetricNames.RETRIES)
+                .description("重试相关事件次数")
+                .tag("action", "exhausted")
+                .register(meterRegistry)
+                .increment();
         executionLogMapper.update(null, Wrappers.<ExecutionLogEntity>lambdaUpdate()
                 .eq(ExecutionLogEntity::getId, execution.getId())
                 .in(ExecutionLogEntity::getStatus, ExecutionStatus.FAILED, ExecutionStatus.TIMEOUT)

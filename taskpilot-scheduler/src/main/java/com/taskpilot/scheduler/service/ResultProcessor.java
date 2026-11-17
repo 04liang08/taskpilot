@@ -3,8 +3,12 @@ package com.taskpilot.scheduler.service;
 import com.taskpilot.common.dto.ExecutionResultMessage;
 import com.taskpilot.common.enums.ExecutionStatus;
 import com.taskpilot.common.enums.TriggerType;
+import com.taskpilot.common.metrics.MetricNames;
 import com.taskpilot.scheduler.entity.ExecutionLogEntity;
 import com.taskpilot.scheduler.shard.ShardFailedEvent;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.DistributionSummary;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.ApplicationEventPublisher;
@@ -33,10 +37,13 @@ public class ResultProcessor {
 
     private final ExecutionService executionService;
     private final ApplicationEventPublisher eventPublisher;
+    private final MeterRegistry meterRegistry;
 
-    public ResultProcessor(ExecutionService executionService, ApplicationEventPublisher eventPublisher) {
+    public ResultProcessor(ExecutionService executionService, ApplicationEventPublisher eventPublisher,
+                           MeterRegistry meterRegistry) {
         this.executionService = executionService;
         this.eventPublisher = eventPublisher;
+        this.meterRegistry = meterRegistry;
     }
 
     /**
@@ -52,10 +59,13 @@ public class ResultProcessor {
                 message.errorMessage(), message.resultSummary());
         if (!transitioned) {
             // 重复投递，或者记录已经被下线收尾 / 其它路径收过了。
+            countResult(message.status(), "ignored");
             log.info("execution result ignored, record already finalized: executionId={}, status={}",
                     message.executionId(), message.status());
             return;
         }
+        countResult(message.status(), "applied");
+        recordDuration(message.status(), durationMs);
         log.info("execution result applied: executionId={}, taskId={}, shard={}/{}, status={}, durationMs={}, executor={}",
                 message.executionId(), message.taskId(), execution.getShardIndex(), execution.getShardTotal(),
                 message.status(), durationMs, message.executorAddress());
@@ -73,10 +83,42 @@ public class ResultProcessor {
                                                       String errorMessage) {
         long durationMs = elapsedMs(execution.getStartTime());
         boolean transitioned = executionService.finishIfRunning(execution, status, durationMs, errorMessage, null);
+        if (!transitioned) {
+            // 记录已被结果消息或其它路径收尾：语义与 process() 一致，只记 ignored。
+            countResult(status, "ignored");
+        } else {
+            countResult(status, "dispatch_failure");
+            recordDuration(status, durationMs);
+        }
         if (transitioned && isFailure(status)) {
             publishShardFailed(execution);
         }
         return executionService.get(execution.getId());
+    }
+
+    /** 结果处理计数：status 低基数枚举 + applied|ignored|dispatch_failure。 */
+    private void countResult(ExecutionStatus status, String outcome) {
+        Counter.builder(MetricNames.EXECUTION_RESULTS)
+                .description("执行结果处理次数")
+                .tag("status", status.name().toLowerCase())
+                .tag("outcome", outcome)
+                .register(meterRegistry)
+                .increment();
+    }
+
+    /**
+     * 执行耗时分布（毫秒，取执行器上报的 durationMs）。
+     * <p>histogram 由配置 percentiles-histogram 打开，Prometheus 侧可算 P95/P99，
+     * 与压测报告口径对齐（ADR-022）。</p>
+     */
+    private void recordDuration(ExecutionStatus status, long durationMs) {
+        DistributionSummary.builder(MetricNames.EXECUTION_DURATION)
+                .description("执行耗时（调度侧观测，毫秒）")
+                .baseUnit("ms")
+                .tag("status", status.name().toLowerCase())
+                .publishPercentileHistogram()
+                .register(meterRegistry)
+                .record(durationMs);
     }
 
     private boolean isFailure(ExecutionStatus status) {

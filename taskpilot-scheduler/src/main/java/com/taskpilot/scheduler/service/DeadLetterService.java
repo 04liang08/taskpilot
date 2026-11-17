@@ -4,7 +4,10 @@ import com.taskpilot.scheduler.entity.DeadLetterEntity;
 import com.taskpilot.scheduler.entity.ExecutionLogEntity;
 import com.taskpilot.scheduler.mapper.DeadLetterMapper;
 import com.taskpilot.common.dto.AlertMessage;
+import com.taskpilot.common.metrics.MetricNames;
 import com.taskpilot.common.mq.AlertChannel;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.dao.DuplicateKeyException;
@@ -32,10 +35,22 @@ public class DeadLetterService {
 
     private final DeadLetterMapper deadLetterMapper;
     private final AlertChannel alertChannel;
+    private final MeterRegistry meterRegistry;
 
-    public DeadLetterService(DeadLetterMapper deadLetterMapper, AlertChannel alertChannel) {
+    public DeadLetterService(DeadLetterMapper deadLetterMapper, AlertChannel alertChannel,
+                             MeterRegistry meterRegistry) {
         this.deadLetterMapper = deadLetterMapper;
         this.alertChannel = alertChannel;
+        this.meterRegistry = meterRegistry;
+    }
+
+    /** 死信计数：outcome=recorded|duplicate。 */
+    private void countDeadLetter(String outcome) {
+        Counter.builder(MetricNames.DEADLETTERS)
+                .description("死信落库次数（幂等跳过另记 duplicate）")
+                .tag("outcome", outcome)
+                .register(meterRegistry)
+                .increment();
     }
 
     /**
@@ -61,9 +76,11 @@ public class DeadLetterService {
             deadLetterMapper.insert(entity);
         } catch (DuplicateKeyException e) {
             // 同一条执行记录已经有死信了：幂等，不重复落库也不重复告警。
+            countDeadLetter("duplicate");
             log.info("dead letter already recorded, skip: executionId={}", execution.getId());
             return false;
         }
+        countDeadLetter("recorded");
         log.error("dead letter recorded: executionId={}, taskId={}, shard={}/{}, retryCount={}, reason={}",
                 execution.getId(), execution.getTaskId(), entity.getShardIndex(), entity.getShardTotal(),
                 entity.getRetryCount(), reason);

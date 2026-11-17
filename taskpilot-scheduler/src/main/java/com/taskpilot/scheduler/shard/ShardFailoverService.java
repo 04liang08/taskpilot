@@ -4,6 +4,7 @@ import com.taskpilot.common.enums.ExecutionStatus;
 import com.taskpilot.common.enums.TaskStatus;
 import com.taskpilot.common.enums.TriggerType;
 import com.taskpilot.common.exception.BizException;
+import com.taskpilot.common.metrics.MetricNames;
 import com.taskpilot.scheduler.entity.ExecutionLogEntity;
 import com.taskpilot.scheduler.entity.ExecutorEntity;
 import com.taskpilot.scheduler.entity.TaskEntity;
@@ -12,6 +13,8 @@ import com.taskpilot.scheduler.service.ExecutionService;
 import com.taskpilot.scheduler.service.ExecutorService;
 import com.taskpilot.scheduler.service.TaskService;
 import com.taskpilot.scheduler.service.TriggerService;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -51,6 +54,7 @@ public class ShardFailoverService {
     private final TriggerService triggerService;
     private final ShardAllocatorRegistry shardAllocatorRegistry;
     private final ThreadPoolTaskExecutor shardExecutor;
+    private final MeterRegistry meterRegistry;
 
     /** 本地幂等：同一个执行记录同时只允许一个转移在跑。 */
     private final Set<Long> transferring = ConcurrentHashMap.newKeySet();
@@ -60,13 +64,27 @@ public class ShardFailoverService {
                                 ExecutionService executionService,
                                 TriggerService triggerService,
                                 ShardAllocatorRegistry shardAllocatorRegistry,
-                                @Qualifier("shardExecutor") ThreadPoolTaskExecutor shardExecutor) {
+                                @Qualifier("shardExecutor") ThreadPoolTaskExecutor shardExecutor,
+                                MeterRegistry meterRegistry) {
         this.taskService = taskService;
         this.executorService = executorService;
         this.executionService = executionService;
         this.triggerService = triggerService;
         this.shardAllocatorRegistry = shardAllocatorRegistry;
         this.shardExecutor = shardExecutor;
+        this.meterRegistry = meterRegistry;
+    }
+
+    /**
+     * 失败转移计数（ADR-022）：outcome=takeover|skipped_online|skipped_manual|exhausted。
+     * 其余罕见跳过（记录仍 RUNNING 待兜底、无候选机、抢注失败等）以日志与池指标为准。
+     */
+    private void countFailover(String outcome) {
+        Counter.builder(MetricNames.FAILOVERS)
+                .description("失败转移结果次数")
+                .tag("outcome", outcome)
+                .register(meterRegistry)
+                .increment();
     }
 
     /**
@@ -134,11 +152,13 @@ public class ShardFailoverService {
             if (execution.getTriggerType() == TriggerType.MANUAL) {
                 // 手动触发失败就是失败，由用户决定要不要重来。
                 // 执行器下线的批量转移不能把 MANUAL 记录也自动重试一遍。
+                countFailover("skipped_manual");
                 log.info("shard failover skipped, manual trigger: executionId={}", execution.getId());
                 return;
             }
             if (execution.getExecutorId() != null && isOnline(execution.getExecutorId())) {
                 // 原执行器还在线：失败多半是任务自身的问题（处理器抛异常），不该转移。
+                countFailover("skipped_online");
                 log.info("shard failover skipped, executor still online: executionId={}, executorId={}",
                         execution.getId(), execution.getExecutorId());
                 return;
@@ -146,6 +166,7 @@ public class ShardFailoverService {
             if (!executionService.canRetry(execution, task)) {
                 // 重试预算用完：清掉 next_retry_time，这条记录当场落终态（死信），
                 // 不再换机重试，也不会被兜底扫描反复捞回来。
+                countFailover("exhausted");
                 log.warn("shard failover skipped, no retry budget left: executionId={}, retryCount={}, maxRetry={}",
                         execution.getId(), execution.getRetryCount(), task.getRetryMax());
                 executionService.markRetryExhausted(execution, "重试预算耗尽");
@@ -173,6 +194,7 @@ public class ShardFailoverService {
                 log.info("shard failover skipped, already claimed: executionId={}", execution.getId());
                 return;
             }
+            countFailover("takeover");
             log.warn("shard failover: executionId={}, taskId={}, shard={}/{}, {} -> {}, retryCount={}",
                     execution.getId(), task.getId(), execution.getShardIndex(), execution.getShardTotal(),
                     previousAddress, target.getAddress(), execution.getRetryCount());

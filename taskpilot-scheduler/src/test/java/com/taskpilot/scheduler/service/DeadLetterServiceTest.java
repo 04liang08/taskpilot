@@ -3,10 +3,13 @@ package com.taskpilot.scheduler.service;
 import com.taskpilot.common.dto.AlertMessage;
 import com.taskpilot.common.enums.ExecutionStatus;
 import com.taskpilot.common.enums.TriggerType;
+import com.taskpilot.common.metrics.MetricNames;
 import com.taskpilot.common.mq.AlertChannel;
 import com.taskpilot.scheduler.entity.DeadLetterEntity;
 import com.taskpilot.scheduler.entity.ExecutionLogEntity;
 import com.taskpilot.scheduler.mapper.DeadLetterMapper;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -33,10 +36,11 @@ class DeadLetterServiceTest {
     private AlertChannel alertChannel;
 
     private DeadLetterService deadLetterService;
+    private final SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
 
     @BeforeEach
     void setUp() {
-        deadLetterService = new DeadLetterService(deadLetterMapper, alertChannel);
+        deadLetterService = new DeadLetterService(deadLetterMapper, alertChannel, meterRegistry);
     }
 
     @Test
@@ -62,6 +66,9 @@ class DeadLetterServiceTest {
         assertThat(alertCaptor.getValue().alertType()).isEqualTo(DeadLetterService.ALERT_TYPE_DEAD_LETTER);
         assertThat(alertCaptor.getValue().executionId()).isEqualTo(100L);
         assertThat(alertCaptor.getValue().taskId()).isEqualTo(1L);
+
+        // 4.10.3：真落了一条死信计入 recorded（ADR-022）。
+        assertThat(deadLetterCounter("recorded").count()).isEqualTo(1.0);
     }
 
     @Test
@@ -73,6 +80,8 @@ class DeadLetterServiceTest {
         assertThat(deadLetterService.record(execution(100L), "重试预算耗尽")).isFalse();
 
         verify(alertChannel, never()).publish(any(AlertMessage.class));
+        // 幂等跳过单独计数为 duplicate。
+        assertThat(deadLetterCounter("duplicate").count()).isEqualTo(1.0);
     }
 
     @Test
@@ -81,6 +90,10 @@ class DeadLetterServiceTest {
 
         verify(deadLetterMapper, never()).insert(any(DeadLetterEntity.class));
         verify(alertChannel, never()).publish(any(AlertMessage.class));
+    }
+
+    private Counter deadLetterCounter(String outcome) {
+        return meterRegistry.get(MetricNames.DEADLETTERS).tag("outcome", outcome).counter();
     }
 
     private ExecutionLogEntity execution(Long id) {
