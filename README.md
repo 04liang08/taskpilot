@@ -131,6 +131,9 @@ bash scripts/run-executor.sh
 ```bash
 curl http://localhost:8080/actuator/health
 curl http://localhost:8081/actuator/health
+
+# 指标（4.10，ADR-022）：自动绑定的 JVM/连接池/线程池 + taskpilot.* 业务埋点
+curl -s http://localhost:8080/actuator/prometheus | grep -E '^taskpilot_|^executor_|^hikaricp_' | head
 ```
 
 执行器启动后会自动注册，并每 10 秒发送一次心跳：
@@ -278,6 +281,8 @@ export TASKPILOT_AUTH_TOKEN="换成你自己的长随机串"
 
 - **管理 API（任务 CRUD / 执行记录 / 仪表盘 / 演示页）与 `/actuator/**` 保持开放**，
   仅限内网使用——这是刻意的取舍，理由见 [ADR-020](docs/design-decisions.md)。
+  指标端点 `/actuator/prometheus`（4.10，ADR-022）同样不设鉴权，公网部署前要么加反代认证，
+  要么收缩 `management.endpoints.web.exposure.include`。
 - token 比对用常量时间比较（`MessageDigest.isEqual`），避免时序侧信道；
   **没配 token 时内部接口一律拒绝**（fail-closed），启动日志会打一条 ERROR 说明原因。
 
@@ -401,7 +406,8 @@ export TASKPILOT_AUTH_TOKEN="换成你自己的长随机串"
 - [x] Day 1：结果异步上报（RabbitMQ：ACK + 结果消息 + DLX）+ 手动触发统一异步 + 死信表与告警广播 + `scripts/verify-week4.ps1`
 - [x] Day 2：内部接口双向共享 token 鉴权（ADR-020）+ GitHub Actions CI（单测 + bash 冒烟，ADR-021）
 - [x] Day 3：压测（JMeter 三档并发 + 异步管道持续负载），见 [压测报告](docs/perf-report.md)
-- [ ] Day 4~5：Micrometer 指标、CI 增强
+- [x] Day 4：Micrometer 指标（Prometheus 暴露通道 + 线程池/池拒绝 + 触发/结果/重试/死信/leader 业务埋点，ADR-022）
+- [ ] Day 5：CI 增强（指标可视化栈为可选项，见 ADR-022 代价节）
 
 ## 8. 文档索引
 

@@ -507,3 +507,73 @@ e2e job 用 `mvn -B clean package -DskipTests`（不用 `-Dmaven.test.skip=true`
   它们靠本机完整验收 + 评审保证。
 - service container 的端口是固定的（3306 / 6379 / 5672），CI runner 上如果被占用会起不来
   （GitHub 的 runner 是全新的，一般不会）。
+
+---
+
+## ADR-022：指标用 Micrometer + Prometheus 拉模型，定位演示级可观测性
+
+- **日期**：2026-11-17
+- **状态**：已采纳（4.10）
+- **关联**：ADR-019（异步链路）、ADR-020（管理端点同样保持开放）、ADR-021、[压测报告](perf-report.md)
+
+### 背景与问题
+
+压测（4.8）给出了现象但给不出解释：200 并发时 P50 从 46ms 跳到 354ms、吞吐只涨 33%——
+拐点到底是队列排队、连接池还是 MQ？需要把"触发 → 派发 → 执行 → 回传"链路上的关键行为
+变成可持续拉取的指标，让拐点的故事能用数据讲清。
+
+### 方案比较与决策
+
+1. **Micrometer + actuator 的 `/actuator/prometheus`（采纳）**：依赖已在 classpath，
+   加一个 `micrometer-registry-prometheus` 就得到标准格式；拉模型无需推端配置，演示环境够用。
+2. 自建统计日志/自造 JSON 端点：格式非标准，接不进 Prometheus 生态，否。
+3. OTel / push 网关 / 告警体系：生产监控体系，不是本项目范围，否。
+
+### 决策要点
+
+- **自动绑定优先，不重复埋**：actuator 已自动绑定 JVM、HikariCP、Tomcat、
+  `http_server_requests_*`、rabbitmq（连接/信道/消费/发布速率）与**所有
+  `ThreadPoolTaskExecutor` bean 的 `executor_*` gauge**（name 标签即 bean 名）。
+  线程池排队/活跃数因此是免费的；再手写 `ExecutorServiceMetrics.monitor` 只会造出
+  第二条相同时间线。自定义只补拒绝计数：`CountingRejectedExecutionHandler`
+  （common，装饰 AbortPolicy：先给 `taskpilot.pool.rejected{pool=...}` +1 再原样抛，
+  拒绝语义零改变）。
+- **命名与标签铁律**：`taskpilot.*` 点号命名（Prometheus 渲染下划线、counter 带 `_total`），
+  标签只用低基数枚举（status/trigger_type/outcome/action/pool/handler）。
+  **绝不用 taskId/executionId/executorAddress 当标签**——执行记录 id 是无界增长的高基数，
+  会直接打爆 Prometheus 时间线。名字常量收敛在 `common/metrics/MetricNames`。
+- **执行耗时的两个口径**（同名不同渲染，互不覆盖）：
+  调度中心侧 `taskpilot.execution.duration` 是 DistributionSummary（baseUnit=ms，
+  值取执行器上报的 `durationMs`，即"业务耗时"）；执行器侧是 Timer（处理器环绕计时，
+  含提交排队）。Prometheus 侧分别渲染 `..._milliseconds_*` 与 `..._seconds_*`。
+- **直方图**：`http.server.requests` 与 `taskpilot.execution.duration` 开
+  percentiles-histogram，Prometheus 可算 P95/P99，与压测报告口径对齐。
+- **leader 观测零侵入**：`LeaderMetrics` 独立组件——gauge 读
+  `LeaderElectionService.isLeader()`，切换计数订阅既有 `LeaderChangedEvent`，
+  选举代码与既有单测都不动。
+- **埋点清单**（outcome 全部为有限枚举）：
+  | 指标 | 类型 | 位置 |
+  |---|---|---|
+  | `taskpilot.triggers{trigger_type,outcome}` | Counter | TriggerService 三个守卫分支 + 成功派发 |
+  | `taskpilot.dispatch{outcome}` | Timer | TriggerService.dispatch 的 ACK 往返 |
+  | `taskpilot.execution.results{status,outcome}` | Counter | ResultProcessor 两条入口（applied/ignored/dispatch_failure） |
+  | `taskpilot.execution.duration{status/handler}` | Summary / Timer | ResultProcessor applied / ExecutionDispatcher run |
+  | `taskpilot.retries{action}` | Counter | RetryService scheduled·handed_over + ExecutionService exhausted |
+  | `taskpilot.failovers{outcome}` | Counter | ShardFailoverService 四类分支 |
+  | `taskpilot.deadletters{outcome}` | Counter | DeadLetterService recorded/duplicate |
+  | `taskpilot.leader` + `taskpilot.leader.transitions{to}` | Gauge/Counter | LeaderMetrics |
+  | `taskpilot.pool.rejected{pool}` | Counter | CountingRejectedExecutionHandler（3 个 Abort 池） |
+  | `taskpilot.executions{status,handler}` | Counter | ExecutionDispatcher run |
+  | `taskpilot.results.published{outcome}` | Counter | RabbitResultChannel confirmed/gave_up |
+
+### 代价与边界（如实）
+
+- **单队列深度没有自动指标**：spring-rabbit 的 micrometer 绑定只到连接/信道/消费与发布速率，
+  **不含队列 messages 深度**。可选项（用 RabbitMQ management API 轮询注册 gauge）本批未做——
+  压测里已有同款外部探针（run-perf.sh），演示够用。
+- `/actuator/prometheus` 与其余管理端点一样**不设鉴权**（ADR-020 口径：仅限内网）。
+  公网部署要么加反代认证要么关掉该端点暴露。
+- 演示级：无告警规则、无长期存储、无 Prometheus/Grafana 容器（compose 未加）；
+  验证方式是 `curl /actuator/prometheus | grep taskpilot_`。可视化留作后续。
+- 池 gauge 的 name 标签来自 bean 名（`triggerExecutor`/`shardExecutor`/
+  `taskExecutorPool`/`executionDispatchPool`），改 bean 名会让历史时间线断档——已知即可。
