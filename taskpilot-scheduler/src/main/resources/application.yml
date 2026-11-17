@@ -65,10 +65,18 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info,metrics
+        include: health,info,metrics,prometheus
   endpoint:
     health:
       show-details: always
+  metrics:
+    tags:
+      # 公共标签：多应用指标汇到同一个 Prometheus 时靠它区分来源
+      application: taskpilot-scheduler
+    distribution:
+      percentiles-histogram:
+        # 触发接口快回，压测拐点要靠这条的 P95/P99 观测（与压测报告口径对齐）
+        http.server.requests: true
 
 taskpilot:
   auth:

@@ -56,10 +56,17 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info,metrics
+        include: health,info,metrics,prometheus
   endpoint:
     health:
       show-details: always
+  metrics:
+    tags:
+      # 公共标签：多应用指标汇到同一个 Prometheus 时靠它区分来源
+      application: taskpilot-executor
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true
 
 logging:
   level:
