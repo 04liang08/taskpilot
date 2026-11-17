@@ -65,8 +65,39 @@ services:
       timeout: 5s
       retries: 12
 
+  # 第 4 周收尾③：可观测性栈（ADR-022）。应用跑在宿主机（java -jar），
+  # Prometheus 经 host.docker.internal 抓 8080/8081 的 /actuator/prometheus。
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    container_name: taskpilot-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    # Docker Desktop 自带 host.docker.internal；Linux 靠 host-gateway 等价解析。
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  # Grafana 自动 provisioning 数据源与 TaskPilot dashboard；
+  # admin/admin 是演示口令（README 已注明），别带进生产。
+  grafana:
+    image: grafana/grafana:10.4.5
+    container_name: taskpilot-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - taskpilot-grafana:/var/lib/grafana
+    depends_on:
+      - prometheus
+
 volumes:
   taskpilot-mysql:
   taskpilot-redis:
   taskpilot-nacos:
   taskpilot-rabbitmq:
+  taskpilot-grafana:

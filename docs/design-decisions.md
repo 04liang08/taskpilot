@@ -573,15 +573,25 @@ e2e job 用 `mvn -B clean package -DskipTests`（不用 `-Dmaven.test.skip=true`
   | `taskpilot.pool.rejected{pool}` | Counter | CountingRejectedExecutionHandler（3 个 Abort 池） |
   | `taskpilot.executions{status,handler}` | Counter | ExecutionDispatcher run |
   | `taskpilot.results.published{outcome}` | Counter | RabbitResultChannel confirmed/gave_up |
+  | `taskpilot.mq.queue.depth{queue}` | Gauge | QueueDepthMetrics 轮询 management API（收尾②） |
 
 ### 代价与边界（如实）
 
-- **单队列深度没有自动指标**：spring-rabbit 的 micrometer 绑定只到连接/信道/消费与发布速率，
-  **不含队列 messages 深度**。可选项（用 RabbitMQ management API 轮询注册 gauge）本批未做——
-  压测里已有同款外部探针（run-perf.sh），演示够用。
+- **单队列深度靠轮询补齐**：spring-rabbit 的 micrometer 绑定只到连接/信道/消费与发布速率，
+  **不含队列 messages 深度**。Week 4 收尾已做：scheduler 侧 `QueueDepthMetrics` 用 RabbitMQ
+  management API 每 15s 轮询 `taskpilot.execution.results.q` / `taskpilot.execution.dead`
+  注册 `taskpilot_mq_queue_depth{queue=...}`（broker 不可达保留上次值 + warn，不拖垮调度线程）。
+  15s 是"演示刷新够用 vs management API 负载可忽略"的折中，不是精确监控口径。
+  踩坑记录：management 路径里的 vhost 必须原样发送 `%2F`——RestClient 的字符串 uri 形式会被
+  当 uriTemplate **再编码**成 `%252F`，真实 API 404，必须走 `uri(URI)`；JDK HttpServer 的
+  context 按解码路径匹配，单测会掩盖这一点（真实集成验证过才敢说对）。
+- 演示级：无告警规则、无长期存储；Prometheus + Grafana 容器已进 compose（Week 4 收尾，
+  `docker compose -f deploy/docker-compose.yml up -d prometheus grafana`），
+  抓取走 host.docker.internal（应用跑宿主机；Linux 靠 extra_hosts host-gateway 等价），
+  Grafana admin/admin 是演示口令。命令行验证仍可用 `curl /actuator/prometheus | grep taskpilot_`。
 - `/actuator/prometheus` 与其余管理端点一样**不设鉴权**（ADR-020 口径：仅限内网）。
   公网部署要么加反代认证要么关掉该端点暴露。
-- 演示级：无告警规则、无长期存储、无 Prometheus/Grafana 容器（compose 未加）；
-  验证方式是 `curl /actuator/prometheus | grep taskpilot_`。可视化留作后续。
+- 无告警规则、无长期存储（指标拉了就看，不做 alerting/recording rules）；
+  可视化栈见上条与 README「可观测性栈」。
 - 池 gauge 的 name 标签来自 bean 名（`triggerExecutor`/`shardExecutor`/
   `taskExecutorPool`/`executionDispatchPool`），改 bean 名会让历史时间线断档——已知即可。

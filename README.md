@@ -136,6 +136,21 @@ curl http://localhost:8081/actuator/health
 curl -s http://localhost:8080/actuator/prometheus | grep -E '^taskpilot_|^executor_|^hikaricp_' | head
 ```
 
+### 5.5 可观测性栈（Prometheus + Grafana，Week 4 收尾）
+
+```bash
+# 前提：应用已在宿主机跑着（5.2/5.3），指标端点才抓得到
+docker compose -f deploy/docker-compose.yml up -d prometheus grafana
+```
+
+- Prometheus：http://127.0.0.1:9090 —— `Status / Targets` 里 `taskpilot-scheduler`、
+  `taskpilot-executor` 两个 job 应为 UP（抓取走 `host.docker.internal`，应用没起就是 DOWN）。
+- Grafana：http://127.0.0.1:3000 —— **admin/admin（演示口令，别带进生产）**；
+  数据源与「TaskPilot 调度链路」dashboard 由 provisioning 自动加载
+  （触发 TPS / 终态分布 / ACK P95 / 池排队与拒绝 / leader / 死信 / 队列深度 / Hikari）。
+- 容器配置在 `deploy/prometheus/` 与 `deploy/grafana/`；取舍与坑见
+  [ADR-022](docs/design-decisions.md)。
+
 执行器启动后会自动注册，并每 10 秒发送一次心跳：
 
 ```bash
@@ -407,7 +422,8 @@ export TASKPILOT_AUTH_TOKEN="换成你自己的长随机串"
 - [x] Day 2：内部接口双向共享 token 鉴权（ADR-020）+ GitHub Actions CI（单测 + bash 冒烟，ADR-021）
 - [x] Day 3：压测（JMeter 三档并发 + 异步管道持续负载），见 [压测报告](docs/perf-report.md)
 - [x] Day 4：Micrometer 指标（Prometheus 暴露通道 + 线程池/池拒绝 + 触发/结果/重试/死信/leader 业务埋点，ADR-022）
-- [ ] Day 5：CI 增强（指标可视化栈为可选项，见 ADR-022 代价节）
+- [x] Day 5：收尾补丁——B-10 鉴权 filter 解码路径匹配 + 队列深度 gauge + Prometheus/Grafana 可视化栈（README 5.5）
+- [ ] 后续：CI 增强（原 Day 4~5 计划的另一半，未在本批范围）
 
 ## 8. 文档索引
 

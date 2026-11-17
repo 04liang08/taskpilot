@@ -1,0 +1,17 @@
+# Prometheus 抓取配置（ADR-022 / Week 4 收尾③）。
+# 应用跑在宿主机（java -jar），容器里用 host.docker.internal 抓它们；
+# Linux 下由 compose 的 extra_hosts: host-gateway 提供同名解析，Docker Desktop 自带。
+global:
+  scrape_interval: 5s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: taskpilot-scheduler
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ['host.docker.internal:8080']
+
+  - job_name: taskpilot-executor
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ['host.docker.internal:8081']
