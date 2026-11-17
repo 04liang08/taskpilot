@@ -498,6 +498,30 @@ class TriggerServiceTest {
         assertThat(triggerCounter("no_executor").count()).isEqualTo(1.0);
     }
 
+    @Test
+    void dispatchTimerExportsPrometheusHistogramBuckets() {
+        // 收尾小修回归：Grafana「派发 ACK P95」靠 histogram_quantile 聚合
+        // taskpilot_dispatch_seconds_bucket；Timer 不开 publishPercentileHistogram
+        // 时该序列不存在、面板空白（复审实证）。这里直接按 Prometheus 导出面断言。
+        io.micrometer.prometheus.PrometheusMeterRegistry promRegistry =
+                new io.micrometer.prometheus.PrometheusMeterRegistry(
+                        io.micrometer.prometheus.PrometheusConfig.DEFAULT);
+        TriggerService promService = new TriggerService(taskService, executorService, executionService,
+                executorClient, leaderStateService, shardAllocatorRegistry, triggerExecutor, shardExecutor,
+                resultProcessor, promRegistry);
+        TaskEntity task = enabledTask();
+        when(taskService.get(1L)).thenReturn(task);
+        when(executorService.listOnline()).thenReturn(List.of(onlineExecutor()));
+        when(executionService.createRunning(eq(task), any(ExecutorEntity.class), eq(TriggerType.MANUAL), any(),
+                anyInt(), anyInt(), anyString()))
+                .thenReturn(new CreatedExecution(runningExecution(260L), true));
+        when(executorClient.execute(eq("127.0.0.1:8081"), any(ExecuteRequest.class))).thenReturn(ExecuteAck.ok());
+
+        promService.trigger(1L);
+
+        assertThat(promRegistry.scrape()).contains("taskpilot_dispatch_seconds_bucket");
+    }
+
     private Counter triggerCounter(String outcome) {
         return meterRegistry.get(MetricNames.TRIGGERS)
                 .tag("trigger_type", "manual")

@@ -354,6 +354,9 @@ public class TriggerService {
         Timer.builder(MetricNames.DISPATCH)
                 .description("派发请求的执行器 ACK 往返耗时")
                 .tag("outcome", outcome)
+                // 开百分位直方图：Grafana「派发 ACK P95」面板用 histogram_quantile
+                // 聚合 taskpilot_dispatch_seconds_bucket，不开就是空面板（收尾复审实证）。
+                .publishPercentileHistogram()
                 .register(meterRegistry)
                 .record(Duration.ofNanos(System.nanoTime() - startNanos));
     }

@@ -554,8 +554,11 @@ e2e job 用 `mvn -B clean package -DskipTests`（不用 `-Dmaven.test.skip=true`
   调度中心侧 `taskpilot.execution.duration` 是 DistributionSummary（baseUnit=ms，
   值取执行器上报的 `durationMs`，即"业务耗时"）；执行器侧是 Timer（处理器环绕计时，
   含提交排队）。Prometheus 侧分别渲染 `..._ms_*`（baseUnit 缩写）与 `..._seconds_*`。
-- **直方图**：`http.server.requests` 与 `taskpilot.execution.duration` 开
-  percentiles-histogram，Prometheus 可算 P95/P99，与压测报告口径对齐。
+- **直方图**：`http.server.requests`（yml 配置）与 `taskpilot.execution.duration`、
+  `taskpilot.dispatch`（代码 `publishPercentileHistogram()`）都开百分位直方图，
+  Prometheus 可算 P95/P99，与压测报告口径对齐。
+  教训：Timer/Summary **不开就没有 `_bucket` 序列**，`histogram_quantile` 面板直接空白
+  ——Grafana 第 3 面板（派发 ACK P95）就是这么暴露的（收尾复审实证，回归测试钉住导出面）。
 - **leader 观测零侵入**：`LeaderMetrics` 独立组件——gauge 读
   `LeaderElectionService.isLeader()`，切换计数订阅既有 `LeaderChangedEvent`，
   选举代码与既有单测都不动。
