@@ -49,6 +49,9 @@ public final class MetricNames {
     /** 结果消息发布计数（publisher confirm）。tag: outcome=confirmed|gave_up */
     public static final String RESULTS_PUBLISHED = "taskpilot.results.published";
 
+    /** 队列深度 Gauge（调度中心轮询 RabbitMQ management API）。tag: queue=<队列名> */
+    public static final String QUEUE_DEPTH = "taskpilot.mq.queue.depth";
+
     private MetricNames() {
     }
 }

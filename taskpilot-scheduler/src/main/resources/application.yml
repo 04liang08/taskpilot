@@ -94,6 +94,11 @@ taskpilot:
   alert:
     # 告警 webhook（可选）：不配就只把告警记在日志里，不做外发。
     webhook-url: ${TASKPILOT_ALERT_WEBHOOK_URL:}
+  metrics:
+    # 队列深度 gauge 走 RabbitMQ management API 轮询（ADR-022）。
+    # 凭据复用 spring.rabbitmq.username/password，不单独配。
+    rabbit-management:
+      url: ${TASKPILOT_RABBITMQ_MANAGEMENT_URL:http://127.0.0.1:15672}
   scheduler:
     # 时间轮：槽位数按秒对齐，一个槽位代表一轮里的同一秒。
     wheel-size: 60
