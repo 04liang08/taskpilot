@@ -545,7 +545,7 @@ e2e job 用 `mvn -B clean package -DskipTests`（不用 `-Dmaven.test.skip=true`
 - **执行耗时的两个口径**（同名不同渲染，互不覆盖）：
   调度中心侧 `taskpilot.execution.duration` 是 DistributionSummary（baseUnit=ms，
   值取执行器上报的 `durationMs`，即"业务耗时"）；执行器侧是 Timer（处理器环绕计时，
-  含提交排队）。Prometheus 侧分别渲染 `..._milliseconds_*` 与 `..._seconds_*`。
+  含提交排队）。Prometheus 侧分别渲染 `..._ms_*`（baseUnit 缩写）与 `..._seconds_*`。
 - **直方图**：`http.server.requests` 与 `taskpilot.execution.duration` 开
   percentiles-histogram，Prometheus 可算 P95/P99，与压测报告口径对齐。
 - **leader 观测零侵入**：`LeaderMetrics` 独立组件——gauge 读

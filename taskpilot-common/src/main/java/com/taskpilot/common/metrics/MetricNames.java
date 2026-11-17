@@ -20,7 +20,7 @@ public final class MetricNames {
     /**
      * 执行耗时。调度中心侧是 DistributionSummary（毫秒，取执行器上报的 durationMs），
      * 执行器侧是 Timer（业务处理器真实耗时）；Prometheus 渲染名分别为
-     * taskpilot_execution_duration_milliseconds_* 与 taskpilot_execution_duration_seconds_*，不会互相覆盖。
+     * taskpilot_execution_duration_ms_* 与 taskpilot_execution_duration_seconds_*，不会互相覆盖。
      * tag: status / handler
      */
     public static final String EXECUTION_DURATION = "taskpilot.execution.duration";

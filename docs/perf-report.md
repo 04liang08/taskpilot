@@ -18,9 +18,11 @@
   100→200 并发吞吐只 +33%（266.7 TPS），P50 却从 46ms 跳到 354ms——服务端开始排队，
   单机默认配置（Hikari 10 连接 / trigger-pool 4~16 / 无调优 MySQL）的容量上限约 **200~270 req/s**。
 - 触发接口本身快回（ACK/RUNNING 语义），异步结果管道在持续负载下**消费不滞后**（§4）。
-- 拐点的解释已可用指标观测（4.10，ADR-022）：高并发档看
-  `executor_queued_tasks{name="executionDispatchPool"}` 排队抬升与
-  `http_server_requests_seconds` / `taskpilot.dispatch` 直方图的 P95 上移即可对上号。
+- 拐点的解释已可用指标观测（4.10，ADR-022）。4.10 验收时按 200 并发复跑一轮做定位，
+  结论与直觉不同：**执行器 `executionDispatchPool` 排队恒为 0**（active ≤5，demoHandler
+  秒回，池远未饱和），瓶颈不在执行侧排队；慢的是**触发请求自身的往返**——
+  `taskpilot.dispatch`（ACK 往返）计满 4000 次、`http_server_requests` P95 与触发 P50
+  同步抬升到 ~490~709ms，叠加 Hikari 连接池竞争。指标的排除法把"池排队"这个候选排除了。
 
 ## 2. 测试环境（如实记录）
 
