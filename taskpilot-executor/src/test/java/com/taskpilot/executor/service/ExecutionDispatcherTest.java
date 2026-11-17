@@ -4,8 +4,10 @@ import com.taskpilot.common.dto.ExecuteRequest;
 import com.taskpilot.common.dto.ExecuteResult;
 import com.taskpilot.common.dto.ExecutionResultMessage;
 import com.taskpilot.common.enums.ExecutionStatus;
+import com.taskpilot.common.metrics.MetricNames;
 import com.taskpilot.common.mq.ResultChannel;
 import com.taskpilot.executor.config.ExecutorProperties;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -37,6 +39,7 @@ class ExecutionDispatcherTest {
     private ExecutorProperties properties;
     private ThreadPoolTaskExecutor dispatchExecutor;
     private ExecutionDispatcher dispatcher;
+    private final SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
 
     @BeforeEach
     void setUp() {
@@ -47,7 +50,8 @@ class ExecutionDispatcherTest {
         dispatchExecutor.setQueueCapacity(8);
         dispatchExecutor.setThreadNamePrefix("taskpilot-dispatch-");
         dispatchExecutor.initialize();
-        dispatcher = new ExecutionDispatcher(dispatchExecutor, taskExecuteService, resultChannel, properties);
+        dispatcher = new ExecutionDispatcher(dispatchExecutor, taskExecuteService, resultChannel, properties,
+                meterRegistry);
     }
 
     @AfterEach
@@ -110,10 +114,27 @@ class ExecutionDispatcherTest {
         ThreadPoolTaskExecutor rejecting = mock(ThreadPoolTaskExecutor.class);
         doThrow(new TaskRejectedException("dispatch pool is full"))
                 .when(rejecting).execute(any(Runnable.class));
-        ExecutionDispatcher service = new ExecutionDispatcher(rejecting, taskExecuteService, resultChannel, properties);
+        ExecutionDispatcher service = new ExecutionDispatcher(rejecting, taskExecuteService, resultChannel,
+                properties, meterRegistry);
 
         assertThat(service.dispatch(request())).isFalse();
         verify(resultChannel, never()).publish(any());
+    }
+
+    @Test
+    void executionMetricsCountCompletionsWithHandlerTag() {
+        // 4.10.4：执行完成计数与处理器耗时（低基数 handler 标签，ADR-022）。
+        // 池满拒绝由 taskpilot.pool.rejected{pool="executionDispatchPool"} 计数（§2 装饰器），这里不重复。
+        ExecuteRequest request = request();
+        when(taskExecuteService.execute(request)).thenReturn(ExecuteResult.success("ok", 12));
+
+        assertThat(dispatcher.dispatch(request)).isTrue();
+
+        verify(resultChannel, timeout(2000)).publish(any());
+        assertThat(meterRegistry.get(MetricNames.EXECUTIONS)
+                .tag("status", "success").tag("handler", "demoHandler").counter().count()).isEqualTo(1.0);
+        assertThat(meterRegistry.get(MetricNames.EXECUTION_DURATION)
+                .tag("handler", "demoHandler").timer().count()).isEqualTo(1);
     }
 
     private ExecuteRequest request() {

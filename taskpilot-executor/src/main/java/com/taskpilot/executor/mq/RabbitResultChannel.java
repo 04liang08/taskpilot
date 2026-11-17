@@ -1,8 +1,11 @@
 package com.taskpilot.executor.mq;
 
 import com.taskpilot.common.dto.ExecutionResultMessage;
+import com.taskpilot.common.metrics.MetricNames;
 import com.taskpilot.common.mq.MqTopology;
 import com.taskpilot.common.mq.ResultChannel;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.amqp.core.MessageDeliveryMode;
@@ -38,9 +41,11 @@ public class RabbitResultChannel implements ResultChannel {
     private static final long RETRY_DELAY_MS = 200L;
 
     private final RabbitTemplate rabbitTemplate;
+    private final MeterRegistry meterRegistry;
 
-    public RabbitResultChannel(RabbitTemplate rabbitTemplate) {
+    public RabbitResultChannel(RabbitTemplate rabbitTemplate, MeterRegistry meterRegistry) {
         this.rabbitTemplate = rabbitTemplate;
+        this.meterRegistry = meterRegistry;
     }
 
     @Override
@@ -48,6 +53,11 @@ public class RabbitResultChannel implements ResultChannel {
         for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
             try {
                 sendOnce(message);
+                Counter.builder(MetricNames.RESULTS_PUBLISHED)
+                        .description("结果消息发布结局（confirmed=拿到 broker 确认；gave_up=重试耗尽显式放弃，等僵尸回收兜底）")
+                        .tag("outcome", "confirmed")
+                        .register(meterRegistry)
+                        .increment();
                 log.info("execution result published: executionId={}, taskId={}, status={}",
                         message.executionId(), message.taskId(), message.status());
                 return;
@@ -61,6 +71,11 @@ public class RabbitResultChannel implements ResultChannel {
         }
         // 到这里结果消息确实丢了。调度中心的僵尸回收会兜底：
         // 记录一直停在 RUNNING，超时后被标成 TIMEOUT 并进入重试。
+        Counter.builder(MetricNames.RESULTS_PUBLISHED)
+                .description("结果消息发布结局（confirmed=拿到 broker 确认；gave_up=重试耗尽显式放弃，等僵尸回收兜底）")
+                .tag("outcome", "gave_up")
+                .register(meterRegistry)
+                .increment();
         log.error("publish execution result gave up: executionId={}, taskId={}, status={}",
                 message.executionId(), message.taskId(), message.status());
     }
