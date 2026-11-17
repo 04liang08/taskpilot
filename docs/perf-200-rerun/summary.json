@@ -1,0 +1,14 @@
+{
+  "threads": 200,
+  "loops": 20,
+  "rampUpSeconds": 10,
+  "taskCount": 4000,
+  "requests": 4000,
+  "errors": 0,
+  "errorRatePercent": 0.00,
+  "durationSeconds": 16,
+  "tps": 250.0,
+  "p50Ms": 440,
+  "p95Ms": 638,
+  "p99Ms": 733
+}
