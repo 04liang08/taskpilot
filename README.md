@@ -2,12 +2,16 @@
 
 分布式任务调度平台：**调度中心（scheduler）+ 执行器（executor）** 两段式架构。
 
-[![CI](https://github.com/MrCai/TaskPilot/actions/workflows/ci.yml/badge.svg)](https://github.com/MrCai/TaskPilot/actions/workflows/ci.yml)
-<!-- 徽章里的仓库名换成你自己的 slug 后就会亮起来 -->
+把「集群下定时任务」的四件难事做透：**只触发一次、失败能转移、重复执行不重复生效、出问题能看见**。
+Java 17 · Spring Boot 3.2 · Redis/Redisson · RabbitMQ · Prometheus/Grafana · 153 个类（122 主代码 + 31 测试）· CI 全绿。
 
-> 当前状态：第 4 周 Day 3 —— 执行结果改走 RabbitMQ 异步上报（调度中心只拿 ACK，结果经 MQ 回传），
+[![CI](https://github.com/USERNAME/TaskPilot/actions/workflows/ci.yml/badge.svg)](https://github.com/USERNAME/TaskPilot/actions/workflows/ci.yml)
+<!-- ↑ 推送到 GitHub 后把两处 USERNAME 换成你的 GitHub 用户名和仓库名，徽章才会亮 -->
+
+> 当前状态：**Week 4 收官** —— 执行结果改走 RabbitMQ 异步上报（调度中心只拿 ACK，结果经 MQ 回传），
 > 手动触发统一返回 `RUNNING` 由页面轮询；重试耗尽与毒消息落死信表并广播告警；
 > 内部接口双向共享 token 鉴权；GitHub Actions CI（单测 + 端到端冒烟）已就绪；
+> Micrometer 指标接入 Prometheus + Grafana（线程池 / 队列深度 / 派发 ACK P95）；
 > JMeter 三档并发实测 TPS 111/200/267、错误率 0，见 [压测报告](docs/perf-report.md)。
 > 第 1~3 周能力（分片并发、失败转移、退避重试、幂等）均已就绪。
 
