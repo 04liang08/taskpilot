@@ -5,8 +5,8 @@
 把「集群下定时任务」的四件难事做透：**只触发一次、失败能转移、重复执行不重复生效、出问题能看见**。
 Java 17 · Spring Boot 3.2 · Redis/Redisson · RabbitMQ · Prometheus/Grafana · 153 个类（122 主代码 + 31 测试）· CI 全绿。
 
-[![CI](https://github.com/USERNAME/TaskPilot/actions/workflows/ci.yml/badge.svg)](https://github.com/USERNAME/TaskPilot/actions/workflows/ci.yml)
-<!-- ↑ 推送到 GitHub 后把两处 USERNAME 换成你的 GitHub 用户名和仓库名，徽章才会亮 -->
+[![CI](https://github.com/04liang08/taskpilot/actions/workflows/ci.yml/badge.svg)](https://github.com/04liang08/taskpilot/actions/workflows/ci.yml)
+<!-- 徽章与 Actions 页同源；push 到 main 后约 3-5 分钟出结果 -->
 
 > 当前状态：**Week 4 收官** —— 执行结果改走 RabbitMQ 异步上报（调度中心只拿 ACK，结果经 MQ 回传），
 > 手动触发统一返回 `RUNNING` 由页面轮询；重试耗尽与毒消息落死信表并广播告警；
@@ -100,7 +100,7 @@ docker compose -f deploy/docker-compose.yml up -d mysql redis nacos rabbitmq
 mysql -h 127.0.0.1 -P 3306 -u root -p < deploy/sql/01-init.sql
 ```
 
-- 数据库连接用环境变量覆盖：`TASKPILOT_MYSQL_URL`、`TASKPILOT_MYSQL_USERNAME`、`TASKPILOT_MYSQL_PASSWORD`。
+- 数据库连接用环境变量覆盖：`TASKPILOT_MYSQL_URL`、`TASKPILOT_MYSQL_04liang08`、`TASKPILOT_MYSQL_PASSWORD`。
 - Redis 从第 2 周（领导选举）开始才需要。Windows 上如果已经装成服务（`Get-Service *redis*` 显示 Running）直接用即可；否则 `redis-server --port 6379` 起一个。
 - 两个应用直接用 IDE 运行启动类，不需要打包部署。
 
